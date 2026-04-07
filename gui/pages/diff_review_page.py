@@ -287,8 +287,8 @@ class DiffReviewPage(QWidget):
     export_requested = pyqtSignal()
 
     def __init__(self, controller: "AppController | None" = None, parent=None):
-        self.setObjectName("DiffReviewPage")   # MUST be first — qfluentwidgets router requirement
         super().__init__(parent=parent)
+        self.setObjectName("DiffReviewPage")   # Must be set before addSubInterface
 
         self._controller = controller
         self._tab_widgets: list[_TabWidget] = []
