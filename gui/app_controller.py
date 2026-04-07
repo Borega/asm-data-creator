@@ -106,10 +106,19 @@ class AppController:
 
     def _on_worker_finished(self, result: GeneratorResult) -> None:
         self._last_result = result
-        snapshot = load_snapshot()
-        diff_result = compute_diff(result, snapshot)
+        self._input_page.on_run_complete()  # always re-enable Run + hide spinner first
 
-        self._input_page.on_run_complete()
+        try:
+            snapshot = load_snapshot()
+        except Exception as exc:  # noqa: BLE001 — includes json.JSONDecodeError
+            MessageBox(
+                "Snapshot Load Error",
+                f"Could not read the previous snapshot (treating as first run).\n\n{exc}",
+                self._window,
+            ).exec()
+            snapshot = None
+
+        diff_result = compute_diff(result, snapshot)
         self._diff_page.load_diff(diff_result)
 
         # Navigate to DiffReviewPage — MainWindow.switchTo() handles nav sync
