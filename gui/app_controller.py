@@ -5,6 +5,7 @@ Instantiated once by MainWindow and passed into all three page constructors.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from qfluentwidgets import MessageBox
 
 from asm_generator import GeneratorConfig, GeneratorResult
 from diff_engine import compute_diff
-from snapshot_store import load_snapshot
+from snapshot_store import load_snapshot, save_snapshot
 from settings_store import SettingsStore
 from gui.workers import GeneratorWorker
 
@@ -39,6 +40,7 @@ class AppController:
 
         # Wire signals (connected on main thread — safe for cross-thread signals)
         input_page.run_requested.connect(self._on_run_requested)
+        diff_page.export_requested.connect(self.export_zip)
 
         # Restore last paths on InputPage
         input_page.restore_paths(
@@ -117,3 +119,61 @@ class AppController:
         self._input_page.on_run_error()
         box = MessageBox("Generation Failed", message, self._window)
         box.exec()
+
+    def export_zip(self) -> None:
+        """Triggered by DiffReviewPage.export_requested. Full export pipeline."""
+        from PyQt6.QtWidgets import QFileDialog
+        from asm_generator.writer import write_to_zip
+
+        # Build GeneratorResult from approved (checkbox-filtered) records
+        approved = self._diff_page.get_approved_records()
+        result = GeneratorResult(
+            students=approved["students"],
+            staff=approved["staff"],
+            courses=approved["courses"],
+            classes=approved["classes"],
+            rosters=approved["rosters"],
+            warnings=self._last_result.warnings if self._last_result else [],
+        )
+
+        # Ask user for output path
+        path, _ = QFileDialog.getSaveFileName(
+            self._window,
+            "Export ASM ZIP",
+            "asm_export.zip",
+            "ZIP Files (*.zip)",
+        )
+        if not path:
+            return  # User cancelled
+
+        # Write ZIP — handle errors before saving snapshot
+        try:
+            write_to_zip(result, path)
+        except (PermissionError, OSError) as exc:
+            if os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            if isinstance(exc, PermissionError):
+                detail = (
+                    f"Permission denied — the file could not be written.\n\n"
+                    f"{path}\n\nMake sure the file is not open in another program."
+                )
+            else:
+                detail = str(exc)
+            box = MessageBox("Export Failed", detail, self._window)
+            box.exec()
+            return
+
+        # Save snapshot only after successful ZIP write
+        save_snapshot(result)
+
+        # Notify user, then reset diff page to placeholder
+        box = MessageBox(
+            "Export Successful",
+            f"The ASM ZIP was exported successfully.\n\n{path}",
+            self._window,
+        )
+        box.exec()
+        self._diff_page.reset()
