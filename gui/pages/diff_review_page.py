@@ -31,7 +31,7 @@ _TAB_DEFS = [
     ("students", "Students", "students", ["person_id", "first_name", "last_name", "grade_level"]),
     ("staff",    "Staff",    "staff",    ["person_id", "first_name", "last_name"]),
     ("courses",  "Courses",  "courses",  ["course_id", "course_name", "location_id"]),
-    ("classes",  "Classes",  "classes",  ["class_id", "course_id", "teacher_id", "grade_level"]),
+    ("classes",  "Classes",  "classes",  ["class_id", "class_number", "course_id", "instructor_id", "location_id"]),
     ("rosters",  "Rosters",  "rosters",  ["roster_id", "class_id", "student_id"]),
 ]
 
