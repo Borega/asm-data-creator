@@ -48,6 +48,8 @@ class SettingsStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())   # ensure data reaches disk before rename
             os.replace(tmp_path, _SETTINGS_PATH)
         except Exception:
             try:
