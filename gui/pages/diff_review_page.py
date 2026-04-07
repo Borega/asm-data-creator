@@ -207,6 +207,13 @@ class _TabWidget(QWidget):
         )
         self._row_metas.append(meta)
 
+    def disconnect_item_changed(self) -> None:
+        """Safely disconnect itemChanged (call before repopulating the table)."""
+        try:
+            self._table.itemChanged.disconnect()
+        except RuntimeError:
+            pass
+
     def wire_item_changed(self) -> None:
         """Connect itemChanged after all rows are populated (avoids mid-populate firing)."""
         self._table.itemChanged.connect(self._on_item_changed)
@@ -364,11 +371,7 @@ class DiffReviewPage(QWidget):
         }
 
         for tab_w in self._tab_widgets:
-            try:
-                tab_w._table.itemChanged.disconnect()
-            except RuntimeError:
-                pass
-
+            tab_w.disconnect_item_changed()
             tab_w.populate(tab_map[tab_w.tab_key])
             tab_w.wire_item_changed()
 
