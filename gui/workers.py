@@ -42,6 +42,38 @@ class GeneratorWorker(QRunnable):
         self._teacher_paths = teacher_paths
         self._export_paths = export_paths
 
+    @staticmethod
+    def _normalise_staff_rows(rows: list[dict]) -> list[dict]:
+        """Remap raw Teacher master CSV rows to the existing_staff schema.
+
+        Accepts two layouts:
+        - staff.csv output  : has ``first_name`` / ``last_name`` columns — pass through unchanged.
+        - Teacher master CSV: has ``foreName`` / ``longName`` columns — remap to staff schema.
+        Rows that have neither format are silently dropped (non-critical path).
+        """
+        if not rows:
+            return rows
+        first_row = rows[0]
+        if "first_name" in first_row and "last_name" in first_row:
+            return rows  # already in expected format
+        if "foreName" in first_row or "longName" in first_row:
+            result = []
+            for row in rows:
+                first = row.get("foreName", "").strip()
+                last = row.get("longName", "").strip()
+                if not first and not last:
+                    continue
+                result.append({
+                    "first_name": first,
+                    "last_name": last,
+                    "person_id": "",  # will be generated fresh
+                    "person_number": row.get("name", row.get("pnr", "")),
+                    "email_address": row.get("address.email", ""),
+                    "sis_username": "",
+                })
+            return result
+        return []  # unknown format — skip to avoid KeyError in build_teacher_records
+
     def run(self) -> None:
         try:
             self.signals.progress.emit(0)
@@ -54,7 +86,8 @@ class GeneratorWorker(QRunnable):
                     try:
                         with open(p, encoding="utf-8-sig", newline="") as f:
                             reader = csv.DictReader(f)
-                            existing_staff.extend(list(reader))
+                            rows = self._normalise_staff_rows(list(reader))
+                            existing_staff.extend(rows)
                     except Exception:
                         pass  # non-critical; generate() tolerates empty existing_staff
 
