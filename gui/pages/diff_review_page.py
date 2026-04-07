@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 _COLOR_ADDED = QColor("#d4edda")
 _COLOR_CHANGED = QColor("#fff3cd")
 _COLOR_DELETED = QColor("#f8d7da")
+_COLOR_TEXT = QColor("#000000")  # force black text on all colored rows (dark theme compat)
 
 # ---- Tab configuration: (tab_key, tab_label, data_attr, key_columns) ----
 _TAB_DEFS = [
@@ -151,6 +152,7 @@ class _TabWidget(QWidget):
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             if bg_color:
                 item.setBackground(bg_color)
+                item.setForeground(_COLOR_TEXT)
             self._table.setItem(row_idx, col_idx, item)
 
         status_item = QTableWidgetItem(status.value.upper())
@@ -158,6 +160,7 @@ class _TabWidget(QWidget):
         status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if bg_color:
             status_item.setBackground(bg_color)
+            status_item.setForeground(_COLOR_TEXT)
         status_col = len(key_cols)
         self._table.setItem(row_idx, status_col, status_item)
 
@@ -170,6 +173,7 @@ class _TabWidget(QWidget):
             chk_item.setCheckState(Qt.CheckState.Checked)
             if bg_color:
                 chk_item.setBackground(bg_color)
+                chk_item.setForeground(_COLOR_TEXT)
             chk_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._table.setItem(row_idx, chk_col, chk_item)
             self.n_changed += 1
@@ -180,6 +184,7 @@ class _TabWidget(QWidget):
             chk_item.setCheckState(Qt.CheckState.Unchecked)
             if bg_color:
                 chk_item.setBackground(bg_color)
+                chk_item.setForeground(_COLOR_TEXT)
             chk_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._table.setItem(row_idx, chk_col, chk_item)
             self.n_deleted += 1
@@ -190,6 +195,7 @@ class _TabWidget(QWidget):
             placeholder.setFlags(placeholder.flags() & ~Qt.ItemFlag.ItemIsEditable)
             if bg_color:
                 placeholder.setBackground(bg_color)
+                placeholder.setForeground(_COLOR_TEXT)
             self._table.setItem(row_idx, chk_col, placeholder)
 
         elif status == DiffStatus.UNCHANGED:
