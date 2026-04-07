@@ -17,6 +17,7 @@ from qfluentwidgets import (
     FluentIcon as FIF,
     HorizontalSeparator,
     IndeterminateProgressRing,
+    MessageBox,
     PrimaryPushButton,
     PushButton,
     SubtitleLabel,
@@ -177,6 +178,14 @@ class InputPage(QWidget):
     # ------------------------------------------------------------------
 
     def _on_run_clicked(self) -> None:
+        if not self._student_paths:
+            box = MessageBox("Missing Input", "Please select a student CSV file.", self.window())
+            box.exec()
+            return
+        if not self._export_paths:
+            box = MessageBox("Missing Input", "Please select at least one course export CSV.", self.window())
+            box.exec()
+            return
         self._run_btn.setEnabled(False)
         self._spinner.show()
         self._status_label.setText("Running…")
