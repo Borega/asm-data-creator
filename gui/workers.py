@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import csv
-import io
 from pathlib import Path
 from typing import TYPE_CHECKING
 
