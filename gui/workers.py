@@ -85,9 +85,17 @@ class GeneratorWorker(QRunnable):
                 if p.is_file():
                     try:
                         with open(p, encoding="utf-8-sig", newline="") as f:
-                            reader = csv.DictReader(f)
-                            rows = self._normalise_staff_rows(list(reader))
-                            existing_staff.extend(rows)
+                            content = f.read()
+                        # Auto-detect delimiter (tab for school exports, comma for staff.csv)
+                        try:
+                            dialect = csv.Sniffer().sniff(content[:2048], delimiters="\t,;")
+                            delimiter = dialect.delimiter
+                        except csv.Error:
+                            delimiter = ","
+                        import io as _io
+                        reader = csv.DictReader(_io.StringIO(content), delimiter=delimiter)
+                        rows = self._normalise_staff_rows(list(reader))
+                        existing_staff.extend(rows)
                     except Exception:
                         pass  # non-critical; generate() tolerates empty existing_staff
 
