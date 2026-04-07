@@ -149,7 +149,7 @@ class AppController:
         # Write ZIP — handle errors before saving snapshot
         try:
             write_to_zip(result, path)
-        except (PermissionError, OSError) as exc:
+        except Exception as exc:
             if os.path.exists(path):
                 try:
                     os.unlink(path)
