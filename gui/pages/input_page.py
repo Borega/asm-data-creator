@@ -33,7 +33,7 @@ class InputPage(QWidget):
 
     def __init__(self, controller: "AppController | None" = None, parent=None):
         super().__init__(parent=parent)
-        self.setObjectName("InputPage")   # MUST be first statement — qfluentwidgets router requirement
+        self.setObjectName("InputPage")   # Must be set before addSubInterface
 
         self._controller = controller
 

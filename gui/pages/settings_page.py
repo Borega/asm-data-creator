@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 class SettingsPage(QWidget):
     def __init__(self, controller: "AppController | None" = None, parent=None):
         super().__init__(parent=parent)
-        self.setObjectName("SettingsPage")   # MUST be first statement — qfluentwidgets router requirement
+        self.setObjectName("SettingsPage")   # Must be set before addSubInterface
 
         self._controller = controller
         self._init_ui()
