@@ -100,11 +100,12 @@ def _parse_export_single(path) -> list:
     sections = []
     current = None
 
+    # Both old format (trailing ;;;) and new format (no trailing semicolons)
     teacher_with_abbr = re.compile(
-        r"^\[(.+?)\]\s+(Herr|Frau)\s+(.+?),\s*(.+?);;;$"
+        r"^\[(.+?)\]\s+(Herr|Frau)\s+(.+?),\s*(.+?)(?:;;;)?$"
     )
     teacher_no_abbr = re.compile(
-        r"^(Herr|Frau)\s+(.+?),\s*(.+?);;;$"
+        r"^(Herr|Frau)\s+(.+?),\s*(.+?)(?:;;;)?$"
     )
 
     i = 0
@@ -150,9 +151,10 @@ def _parse_export_single(path) -> list:
         if current is None:
             continue
 
-        if line.endswith(";;;"):
-            val = line[:-3].strip()
-            if val and val != "Nachname;Vorname;Klassenname;Angebotsname":
+        # Angebotsname lines end with one or more semicolons (old: ;;;, new: ;;;;)
+        if line.endswith(";"):
+            val = line.rstrip(";").strip()
+            if val and val != "Nachname" and ";" not in val:
                 current["angebotsname"] = val
             continue
 
