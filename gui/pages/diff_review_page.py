@@ -211,7 +211,7 @@ class _TabWidget(QWidget):
         """Safely disconnect itemChanged (call before repopulating the table)."""
         try:
             self._table.itemChanged.disconnect()
-        except RuntimeError:
+        except (RuntimeError, TypeError):
             pass
 
     def wire_item_changed(self) -> None:
