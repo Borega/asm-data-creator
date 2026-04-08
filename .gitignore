@@ -1,0 +1,81 @@
+# -----------------------------
+# Publication-safe root ignore
+# -----------------------------
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Tooling caches
+.pytest_cache/
+.pytest_tmp/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+*.whl
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Secrets and local credential material
+.env
+.env.*
+*.pem
+*.key
+
+# Databases / local state
+*.db
+*.sqlite
+*.sqlite3
+
+# Node artifacts (API subtree is excluded anyway)
+node_modules/
+npm-debug.log*
+
+# -----------------------------
+# Project-specific exclusions
+# -----------------------------
+
+# Exclude API package completely for publication
+api/
+
+# Exclude all planning workflow artifacts
+.planning/
+
+# Exclude generated exports and personal/source data files
+*.csv
+*.tsv
+*.zip
+*.pdf
+
+# Keep repository-owned non-personal mapping files
+!subject_map.json
+teacher_aliases.json
+!teacher_aliases.empty.json
+
+# Keep official ASM template CSVs required by writer
+!asmtemplates/
+!asmtemplates/*.csv
