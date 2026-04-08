@@ -1,0 +1,46 @@
+name: Release Windows EXE
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build EXE with PyInstaller
+        run: pyinstaller asm_generator.spec
+
+      - name: Prepare release zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/ASM-Generator/*" -DestinationPath "ASM-Generator-${{ github.ref_name }}.zip" -Force
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ASM Generator ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            ASM-Generator-${{ github.ref_name }}.zip
