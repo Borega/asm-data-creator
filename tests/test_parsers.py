@@ -1,7 +1,7 @@
 """Tests for asm_generator.parsers — LIB-01, LIB-02, LIB-06."""
 import pytest
-from tests.conftest import make_student_tsv
-from asm_generator.parsers import parse_students, parse_export
+from tests.conftest import make_student_tsv, make_monolith_csv
+from asm_generator.parsers import parse_students, parse_export, parse_monolith
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +136,14 @@ def test_parse_export_single_section(tmp_path):
     assert sections[0]["rows"][0]["nachname"] == "Schmidt"
 
 
+def test_parse_export_cleans_teacher_first_name_symbols(tmp_path):
+    content = "[Mue] Frau Müller, An(na):2;;;\n5a Sp;;;\nNachname;Vorname;Klassenname;Angebotsname\nSchmidt;Hans;5a;5a Sp\n"
+    export_file = tmp_path / "export_symbols.csv"
+    export_file.write_text(content, encoding="utf-8")
+    sections = parse_export([export_file])
+    assert sections[0]["teacher_first"] == "Anna"
+
+
 # LIB-02: multi-path concatenation (sections from file2 appended after file1)
 def test_parse_export_multi_path_concatenates(tmp_path):
     f1 = tmp_path / "export1.csv"
@@ -154,3 +162,116 @@ def test_parse_export_multi_path_concatenates(tmp_path):
     assert len(sections) == 2
     assert sections[0]["teacher_abbr"] == "Abc"
     assert sections[1]["teacher_abbr"] == "Xyz"
+
+
+def test_parse_monolith_empty_paths_raises():
+    with pytest.raises(ValueError, match="paths must not be empty"):
+        parse_monolith([])
+
+
+def test_parse_monolith_role_split_and_sections(tmp_path):
+    csv_file = tmp_path / "monolith.csv"
+    csv_file.write_text(
+        make_monolith_csv(
+            [
+                {
+                    "Nachname": "Muster",
+                    "Vorname": "Max",
+                    "Klassennamen": "6a",
+                    "Angebote": "6a Sp-2025/2026-Angebot-rissen",
+                    "E-Mail-Adressen der weiteren Schulen": "max@example.org",
+                    "Rolle": "Lernende",
+                    "Interne ID": "stu-1",
+                    "Export ID": "exp-stu-1",
+                },
+                {
+                    "Nachname": "Lehrer",
+                    "Vorname": "Lena",
+                    "Kürzel": "Lhr",
+                    "Angebote": "6a Sp-2025/2026-Angebot-rissen",
+                    "E-Mail-Adressen der weiteren Schulen": "lena@example.org",
+                    "Rolle": "Lehrkraft",
+                    "Interne ID": "tea-1",
+                    "Export ID": "exp-tea-1",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = parse_monolith([csv_file], target_school_year="2025/2026")
+    assert len(result["students"]) == 1
+    assert len(result["sections"]) == 1
+    assert result["sections"][0]["angebotsname"] == "6a Sp"
+    assert result["sections"][0]["teacher_first"] == "Lena"
+    assert result["warnings"] == []
+
+
+def test_parse_monolith_year_filter_and_normalization(tmp_path):
+    csv_file = tmp_path / "monolith_years.csv"
+    csv_file.write_text(
+        make_monolith_csv(
+            [
+                {
+                    "Nachname": "Test",
+                    "Vorname": "Tina",
+                    "Klassennamen": "7b",
+                    "Angebote": "##7b D-2024/2025-Angebot-rissen,7b E-2025/2026-Angebot-rissen",
+                    "Rolle": "Lernende",
+                    "Interne ID": "stu-2",
+                    "Export ID": "exp-stu-2",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = parse_monolith([csv_file], target_school_year="2025/2026")
+    offers = [sec["angebotsname"] for sec in result["sections"]]
+    assert offers == ["7b E"]
+    assert any("no instructor mapping" in w for w in result["warnings"])
+
+
+def test_parse_monolith_preserves_hash_prefixes_for_legacy_parity(tmp_path):
+    csv_file = tmp_path / "monolith_hash.csv"
+    csv_file.write_text(
+        make_monolith_csv(
+            [
+                {
+                    "Nachname": "Foo",
+                    "Vorname": "Bar",
+                    "Klassennamen": "8a",
+                    "Angebote": "##FÖRDER Englisch 6-2025/2026-Angebot-rissen",
+                    "Rolle": "Lernende",
+                    "Interne ID": "s1",
+                    "Export ID": "e1",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = parse_monolith([csv_file], target_school_year="2025/2026")
+    assert result["sections"][0]["angebotsname"] == "##FÖRDER Englisch 6"
+
+
+def test_parse_monolith_uses_rufname_for_section_rows(tmp_path):
+    csv_file = tmp_path / "monolith_rufname.csv"
+    csv_file.write_text(
+        make_monolith_csv(
+            [
+                {
+                    "Nachname": "Muster",
+                    "Vorname": "Maximilian",
+                    "Rufname": "Max",
+                    "Klassennamen": "6a",
+                    "Angebote": "6a Sp-2025/2026-Angebot-rissen",
+                    "Rolle": "Lernende",
+                    "Interne ID": "stu-3",
+                    "Export ID": "exp-stu-3",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = parse_monolith([csv_file], target_school_year="2025/2026")
+    assert result["sections"][0]["rows"][0]["vorname"] == "Max"

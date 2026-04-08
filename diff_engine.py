@@ -164,7 +164,7 @@ def compute_diff(
             current.rosters,
             snap_rosters,
             lambda r: f"{r['class_id']}:{r['student_id']}",
-            # Exclude roster_id from equality: counter-based IDs differ across runs
+            # Exclude roster_id from equality: enrollment identity is class+student.
             eq_fn=lambda c, s: {k: v for k, v in c.items() if k != "roster_id"}
                              == {k: v for k, v in s.items() if k != "roster_id"},
         ),

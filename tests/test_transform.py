@@ -2,15 +2,19 @@
 import json
 import pytest
 from asm_generator.config import GeneratorConfig
+from asm_generator.generator import generate
 from asm_generator.transform import (
     build_student_records,
+    build_student_records_monolith,
     build_teacher_records,
     build_course_records,
+    make_roster_id,
     clean_name_part,
     extract_grade_level,
     slugify,
     expand_angebotsname,
 )
+from tests.conftest import make_monolith_csv
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +68,13 @@ def test_student_person_id_stable_on_name_change(config):
 
 def test_student_email_derived_from_name(config):
     """Email is derived from name (not externKey) — still name-based for display."""
+    students = [{"externKey": "9000", "longName": "Schmidt", "foreName": "Anna", "klasse.name": "6b"}]
+    records = build_student_records(students, config)
+    assert records[0]["email_address"] == "anna.schmidt@rissen.hamburg.de"
+
+
+def test_student_email_still_generated_when_domain_missing(config):
+    config.email_domain = ""
     students = [{"externKey": "9000", "longName": "Schmidt", "foreName": "Anna", "klasse.name": "6b"}]
     records = build_student_records(students, config)
     assert records[0]["email_address"] == "anna.schmidt@rissen.hamburg.de"
@@ -155,6 +166,15 @@ def test_slugify():
     assert slugify("LB Gew") == "lb-gew"
 
 
+def test_make_roster_id_is_stable_and_distinct():
+    a1 = make_roster_id("cls-7a-d", "stu-1")
+    a2 = make_roster_id("cls-7a-d", "stu-1")
+    b = make_roster_id("cls-7a-d", "stu-2")
+    assert a1 == a2
+    assert a1 != b
+    assert a1.startswith("roster-")
+
+
 def test_expand_angebotsname():
     subjects = {"Sp": "Sport", "E": "Englisch"}
     assert expand_angebotsname("5a Sp", subjects) == "5a Sport"
@@ -180,3 +200,141 @@ def test_config_load_aliases_missing_raises(tmp_path):
     )
     with pytest.raises(FileNotFoundError, match="teacher aliases file not found"):
         cfg.load_aliases()
+
+
+def test_build_student_records_monolith_uses_interne_id(config):
+    rows = [
+        {
+            "interne_id": "uuid-1",
+            "export_id": "exp-1",
+            "vorname": "Max",
+            "nachname": "Muster",
+            "class_name": "8a",
+            "email": "",
+        }
+    ]
+    out = build_student_records_monolith(rows, config)
+    assert out[0]["person_id"] == "uuid-1"
+    assert out[0]["person_number"] == "uuid-1"
+    assert out[0]["grade_level"] == "8"
+
+
+def test_build_student_records_monolith_prefers_source_email(config):
+    rows = [
+        {
+            "interne_id": "uuid-2",
+            "export_id": "exp-2",
+            "vorname": "Lea",
+            "nachname": "Lenz",
+            "class_name": "9c",
+            "email": "lea.lenz@example.org",
+        }
+    ]
+    config.email_domain = "rissen.hamburg.de"
+    out = build_student_records_monolith(rows, config)
+    assert out[0]["email_address"] == "lea.lenz@rissen.hamburg.de"
+
+
+def test_build_student_records_monolith_prefers_rufname(config):
+    rows = [
+        {
+            "interne_id": "uuid-3",
+            "export_id": "exp-3",
+            "vorname": "Maximilian",
+            "rufname": "Max",
+            "nachname": "Muster",
+            "class_name": "7a",
+            "email": "",
+        }
+    ]
+    out = build_student_records_monolith(rows, config)
+    assert out[0]["first_name"] == "Max"
+
+
+def test_build_teacher_records_cleans_first_name_symbols(config):
+    sections = [
+        {
+            "teacher_abbr": "Mst",
+            "teacher_first": "An(na):2",
+            "teacher_last": "Muster",
+            "angebotsname": "7a D",
+            "rows": [],
+        }
+    ]
+    result = build_teacher_records(sections, [], config)
+    assert ("Anna", "Muster") in result
+
+
+def test_build_teacher_records_skips_empty_placeholder_teacher(config):
+    sections = [
+        {
+            "teacher_abbr": "",
+            "teacher_first": "",
+            "teacher_last": "",
+            "angebotsname": "7a D",
+            "rows": [],
+        }
+    ]
+    result = build_teacher_records(sections, [], config)
+    assert result == {}
+
+
+def test_build_teacher_records_collision_reuses_pid_without_suffix(config):
+    sections = [
+        {
+            "teacher_abbr": "A1",
+            "teacher_first": "Jan",
+            "teacher_last": "Meyer",
+            "angebotsname": "7a D",
+            "rows": [],
+        },
+        {
+            "teacher_abbr": "A2",
+            "teacher_first": "Jan Karl",
+            "teacher_last": "Meyer",
+            "angebotsname": "7b D",
+            "rows": [],
+        },
+    ]
+    result = build_teacher_records(sections, [], config)
+    pids = {v["person_id"] for v in result.values()}
+    assert pids == {"jan.meyer"}
+    assert all(not pid.endswith("-2") for pid in pids)
+
+
+def test_generate_monolith_mode_outputs_asm_tables(tmp_path, config):
+    monolith = tmp_path / "mono.csv"
+    monolith.write_text(
+        make_monolith_csv(
+            [
+                {
+                    "Nachname": "Muster",
+                    "Vorname": "Max",
+                    "Klassennamen": "6a",
+                    "Angebote": "6a Sp-2025/2026-Angebot-rissen",
+                    "E-Mail-Adressen der weiteren Schulen": "max@example.org",
+                    "Rolle": "Lernende",
+                    "Interne ID": "stu-1",
+                    "Export ID": "exp-stu-1",
+                },
+                {
+                    "Nachname": "Lehrer",
+                    "Vorname": "Lena",
+                    "Kürzel": "Lhr",
+                    "Angebote": "6a Sp-2025/2026-Angebot-rissen",
+                    "Rolle": "Lehrkraft",
+                    "Interne ID": "tea-1",
+                    "Export ID": "exp-tea-1",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config.input_mode = "monolith"
+    config.target_school_year = "2025/2026"
+    result = generate(config, [], [], existing_staff=[], input_mode="monolith", monolith_paths=[monolith])
+    assert len(result.students) == 1
+    assert len(result.staff) == 1
+    assert len(result.courses) == 1
+    assert len(result.classes) == 1
+    assert len(result.rosters) == 1

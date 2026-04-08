@@ -23,8 +23,13 @@ def _open_csv(path) -> list:
     except UnicodeDecodeError:
         pass
 
-    # Chardet fallback
-    import chardet
+    # Chardet fallback (optional dependency).
+    try:
+        import chardet
+    except ModuleNotFoundError:
+        with open(path, encoding="cp1252") as f:
+            return f.readlines()
+
     with open(path, "rb") as fb:
         raw = fb.read()
     detected = chardet.detect(raw)
@@ -94,6 +99,162 @@ def parse_export(paths: list) -> list:
     return all_sections
 
 
+def _normalize_offer_name(token: str) -> str:
+    """Normalize monolith offer tokens into stable course/class names."""
+    s = (token or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"-\d{4}/\d{4}-Angebot-rissen$", "", s)
+    s = s.replace("L:G", "LG")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _clean_teacher_first_name(value: str) -> str:
+    """Remove digits/symbols from teacher first names while preserving letters."""
+    s = (value or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"[^A-Za-zÄÖÜäöüßÀ-ÖØ-öø-ÿ'\-\s]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _preferred_student_first_name(vorname: str, rufname: str) -> str:
+    """Prefer Rufname; fall back to Vorname."""
+    selected = (rufname or "").strip() or (vorname or "").strip()
+    return selected.split()[0] if selected else ""
+
+
+def _split_offers(raw: str, target_school_year: str = "") -> list[str]:
+    """Split comma-separated offers, normalize names, and optionally filter by year."""
+    if not raw:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if target_school_year and target_school_year not in token:
+            continue
+        normalized = _normalize_offer_name(token)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            out.append(normalized)
+    return out
+
+
+def _class_from_row(row: dict) -> str:
+    """Extract a compact class label from monolith fields."""
+    class_name = (row.get("Klassennamen", "") or "").strip()
+    if class_name:
+        return class_name
+    raw = (row.get("Klassen", "") or "").strip()
+    if not raw:
+        return ""
+    return raw.split("-", 1)[0].strip()
+
+
+def parse_monolith(paths: list, target_school_year: str = "") -> dict:
+    """Parse one or more semicolon-delimited monolith user exports.
+
+    Returns dict with:
+      - students: list[dict]
+      - sections: list[dict] (legacy-compatible export sections)
+      - warnings: list[str]
+    """
+    if not paths:
+        raise ValueError("parse_monolith: paths must not be empty")
+
+    students: list[dict] = []
+    staff_rows: list[dict] = []
+    warnings: list[str] = []
+    pending_rows: list[dict] = []
+    year_counts: dict[str, int] = {}
+
+    for path in paths:
+        lines = _open_csv(path)
+        import io
+        text = "".join(lines)
+        reader = csv.DictReader(io.StringIO(text), delimiter=";")
+        for row in reader:
+            role = (row.get("Rolle", "") or "").strip()
+            raw_offers = (row.get("Angebote", "") or "").strip()
+            class_raw = (row.get("Klassen", "") or "").strip()
+            m = re.search(r"(\d{4}/\d{4})", class_raw)
+            if m:
+                year_counts[m.group(1)] = year_counts.get(m.group(1), 0) + 1
+            item = {
+                "nachname": (row.get("Nachname", "") or "").strip(),
+                "vorname": (row.get("Vorname", "") or "").strip(),
+                "rufname": (row.get("Rufname", "") or "").strip(),
+                "email": (row.get("E-Mail-Adressen der weiteren Schulen", "") or "").strip(),
+                "abbr": (row.get("Kürzel", "") or "").strip(),
+                "class_name": _class_from_row(row),
+                "interne_id": (row.get("Interne ID", "") or "").strip(),
+                "export_id": (row.get("Export ID", "") or "").strip(),
+                "raw_offers": raw_offers,
+                "role": role,
+            }
+            pending_rows.append(item)
+
+    effective_year = target_school_year.strip()
+    if not effective_year and year_counts:
+        effective_year = max(year_counts.items(), key=lambda kv: kv[1])[0]
+
+    for item in pending_rows:
+        item["offers"] = _split_offers(item.get("raw_offers", ""), effective_year)
+        item.pop("raw_offers", None)
+        if item["role"] == "Lernende":
+            students.append(item)
+        elif item["role"] == "Lehrkraft":
+            staff_rows.append(item)
+
+    staff_by_offer: dict[str, list[dict]] = {}
+    for person in staff_rows:
+        for offer in person["offers"]:
+            staff_by_offer.setdefault(offer, []).append(person)
+
+    students_by_offer: dict[str, list[dict]] = {}
+    for person in students:
+        for offer in person["offers"]:
+            students_by_offer.setdefault(offer, []).append(person)
+
+    sections: list[dict] = []
+    for offer in sorted(students_by_offer.keys()):
+        teachers = staff_by_offer.get(offer, [])
+        if not teachers:
+            warnings.append(f"WARNING: no instructor mapping for offer {offer}")
+            teachers = [{"vorname": "", "nachname": "", "abbr": ""}]
+
+        rows = [
+            {
+                "nachname": s["nachname"],
+                "vorname": _preferred_student_first_name(
+                    s.get("vorname", ""),
+                    s.get("rufname", ""),
+                ),
+                "klassenname": s["class_name"],
+                "angebotsname": offer,
+            }
+            for s in students_by_offer[offer]
+        ]
+
+        for teacher in teachers:
+            sections.append(
+                {
+                    "teacher_abbr": teacher.get("abbr", ""),
+                    "teacher_first": _clean_teacher_first_name(teacher.get("vorname", "")),
+                    "teacher_last": teacher.get("nachname", ""),
+                    "angebotsname": offer,
+                    "rows": rows,
+                }
+            )
+
+    return {"students": students, "sections": sections, "warnings": warnings}
+
+
 def _parse_export_single(path) -> list:
     """Parse a single export file. Internal helper."""
     lines = _open_csv(path)
@@ -121,7 +282,7 @@ def _parse_export_single(path) -> list:
         if m:
             if current:
                 sections.append(current)
-            tf = m.group(4).strip()
+            tf = _clean_teacher_first_name(m.group(4).strip())
             tl = m.group(3).strip()
             # NOTE: alias resolution is deferred to transform.py (config needed)
             current = {
@@ -137,7 +298,7 @@ def _parse_export_single(path) -> list:
         if m2:
             if current:
                 sections.append(current)
-            tf = m2.group(3).strip()
+            tf = _clean_teacher_first_name(m2.group(3).strip())
             tl = m2.group(2).strip()
             current = {
                 "teacher_abbr": None,

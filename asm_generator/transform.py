@@ -5,6 +5,7 @@ All inputs are passed as arguments. UMLAUT_MAP is the only module-level constant
 """
 from __future__ import annotations
 import re
+import hashlib
 from collections import defaultdict, OrderedDict
 from .config import GeneratorConfig
 
@@ -25,6 +26,8 @@ UMLAUT_MAP = str.maketrans({
     "ą": "a", "ś": "s", "ź": "z",
 })
 
+_CANONICAL_EMAIL_DOMAIN = "rissen.hamburg.de"
+
 # ---------------------------------------------------------------------------
 # Pure helpers (copied verbatim from generate_asm.py)
 # ---------------------------------------------------------------------------
@@ -42,6 +45,45 @@ def make_person_id_parts(first_name: str, last_name: str) -> tuple:
     first_part = clean_name_part(first_token)
     last_part = clean_name_part(last_name.replace(" ", ""))
     return first_part, last_part
+
+
+def _make_email(first_name: str, last_name: str) -> str:
+    """Build canonical ASM email in firstname.lastname@rissen.hamburg.de form."""
+    fp, lp = make_person_id_parts(first_name, last_name)
+    if fp and lp:
+        local = f"{fp}.{lp}"
+    elif fp:
+        local = f"{fp}.unknown"
+    elif lp:
+        local = f"unknown.{lp}"
+    else:
+        local = "unknown.unknown"
+    return f"{local}@{_CANONICAL_EMAIL_DOMAIN}"
+
+
+def _derive_staff_person_id(first_name: str, last_name: str, person_number: str = "") -> str:
+    """Derive robust staff person_id with safe fallbacks (never returns '.')."""
+    fp, lp = make_person_id_parts(first_name, last_name)
+    if fp and lp:
+        return f"{fp}.{lp}"
+    if lp:
+        return lp
+    if fp:
+        return fp
+    pn = clean_name_part(person_number or "")
+    if pn:
+        return f"staff.{pn}"
+    return "staff.unknown"
+
+
+def _clean_teacher_first_name(value: str) -> str:
+    """Remove digits/symbols from teacher first names while preserving letters."""
+    s = (value or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"[^A-Za-zÄÖÜäöüßÀ-ÖØ-öø-ÿ'\-\s]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def extract_grade_level(klasse: str) -> str:
@@ -74,6 +116,13 @@ def slugify(s: str) -> str:
     s = re.sub(r"-+", "-", s).strip("-")
     return s
 
+
+def make_roster_id(class_id: str, student_id: str) -> str:
+    """Create a stable, high-entropy roster identifier from class+student."""
+    token = f"{class_id}|{student_id}".encode("utf-8")
+    digest = hashlib.sha1(token).hexdigest()[:16]
+    return f"roster-{digest}"
+
 # ---------------------------------------------------------------------------
 # Build functions (new signatures — no file I/O)
 # ---------------------------------------------------------------------------
@@ -97,8 +146,7 @@ def build_student_records(parsed_students: list, config: GeneratorConfig) -> lis
         first_name = fore_name.split()[0] if fore_name else ""
         grade = extract_grade_level(klasse)
 
-        fp, lp = make_person_id_parts(fore_name, long_name)
-        email = f"{fp}.{lp}@{config.email_domain}"
+        email = _make_email(first_name, long_name)
 
         result.append({
             "person_id": person_id,
@@ -115,6 +163,41 @@ def build_student_records(parsed_students: list, config: GeneratorConfig) -> lis
     return result
 
 
+def build_student_records_monolith(parsed_students: list, config: GeneratorConfig) -> list:
+    """Build ASM student rows from monolith student records.
+
+    Stable identity source: Interne ID (fallback: Export ID).
+    """
+    result: list = []
+    for s in parsed_students:
+        person_id = (s.get("interne_id", "") or "").strip() or (s.get("export_id", "") or "").strip()
+        if not person_id:
+            continue
+
+        first_name = (s.get("rufname", "") or "").strip() or (s.get("vorname", "") or "").strip()
+        if first_name:
+            first_name = first_name.split()[0]
+        last_name = (s.get("nachname", "") or "").strip()
+        grade = extract_grade_level((s.get("class_name", "") or "").strip())
+        email = _make_email(first_name, last_name)
+
+        result.append(
+            {
+                "person_id": person_id,
+                "person_number": person_id,
+                "first_name": first_name,
+                "middle_name": "",
+                "last_name": last_name,
+                "grade_level": grade,
+                "email_address": email,
+                "sis_username": "",
+                "password_policy": "",
+                "location_id": config.location_id,
+            }
+        )
+    return result
+
+
 def build_teacher_records(
     sections: list,
     existing_staff: list,
@@ -128,52 +211,73 @@ def build_teacher_records(
     aliases = config.load_aliases()
     teachers: dict = OrderedDict()
     seen_pids: set = set()
+    pid_to_key: dict[str, tuple[str, str]] = {}
 
     # Load existing staff records
     for row in existing_staff:
         if row.get("person_id", "").startswith("SAMPLE-"):
             continue
-        first = row["first_name"]
+        first = _clean_teacher_first_name(row["first_name"])
         last = row["last_name"]
         first, last = aliases.get((first, last), (first, last))
-        pid = row["person_id"]
+        first = _clean_teacher_first_name(first)
+        person_number = row.get("person_number", "")
+        pid = _derive_staff_person_id(first, last, person_number)
         if pid in seen_pids:
+            # Same derived person_id -> same teacher; do not create suffixed duplicates.
+            existing_key = pid_to_key.get(pid)
+            if existing_key:
+                teachers[(first, last)] = teachers[existing_key]
             continue
-        fp, lp = make_person_id_parts(first, last)
-        canonical_pid = f"{fp}.{lp}"
-        if canonical_pid in seen_pids:
-            continue
+        canonical_pid = pid
         seen_pids.add(canonical_pid)
         key = (first, last)
         teachers[key] = {
             "person_id": canonical_pid,
-            "person_number": row.get("person_number", ""),
+            "person_number": person_number,
             "first_name": first,
             "last_name": last,
-            "email_address": row.get("email_address", ""),
+            "email_address": _make_email(first, last),
             "sis_username": row.get("sis_username", ""),
             "location_id": config.location_id,
         }
+        pid_to_key[canonical_pid] = key
 
     # Add/update from export sections
     for sec in sections:
-        first = sec["teacher_first"]
+        first = _clean_teacher_first_name(sec["teacher_first"])
         last = sec["teacher_last"]
         abbr = sec["teacher_abbr"]
         first, last = aliases.get((first, last), (first, last))
+        first = _clean_teacher_first_name(first)
+
+        # Placeholder section from missing instructor mapping: do not create phantom staff row.
+        if not first and not last and not (abbr or "").strip():
+            continue
+
         key = (first, last)
         if key not in teachers:
-            fp, lp = make_person_id_parts(first, last)
-            pid = f"{fp}.{lp}"
-            teachers[key] = {
-                "person_id": pid,
-                "person_number": abbr or "",
-                "first_name": first,
-                "last_name": last,
-                "email_address": "",
-                "sis_username": "",
-                "location_id": config.location_id,
-            }
+            pid = _derive_staff_person_id(first, last, abbr or "")
+            if pid in seen_pids:
+                # Collision means we treat this as the same teacher identity.
+                existing_key = pid_to_key.get(pid)
+                if existing_key:
+                    teachers[key] = teachers[existing_key]
+                    rec = teachers[key]
+                    if abbr and not rec.get("person_number"):
+                        rec["person_number"] = abbr
+            else:
+                seen_pids.add(pid)
+                teachers[key] = {
+                    "person_id": pid,
+                    "person_number": abbr or "",
+                    "first_name": first,
+                    "last_name": last,
+                    "email_address": _make_email(first, last),
+                    "sis_username": "",
+                    "location_id": config.location_id,
+                }
+                pid_to_key[pid] = key
         else:
             rec = teachers[key]
             if abbr and not rec.get("person_number"):
@@ -240,7 +344,6 @@ def build_class_records(
     classes: list = []
     rosters: list = []
     warnings: list = []
-    roster_counter = 1
 
     for an, class_entries in classes_by_an.items():
         course_id = courses_map[an]["course_id"]
@@ -248,7 +351,7 @@ def build_class_records(
             e["teacher_pid"] for e in class_entries if e["teacher_pid"]
         ))
         class_id = f"cls-{slugify(an)}"
-        instructor_ids = (teacher_pids + ["", ""])[:3]
+        instructor_ids = (teacher_pids + ["", "", ""])[:3]
 
         classes.append({
             "class_id": class_id,
@@ -280,10 +383,9 @@ def build_class_records(
                 if pid not in seen_students:
                     seen_students.add(pid)
                     rosters.append({
-                        "roster_id": f"roster-{roster_counter:05d}",
+                        "roster_id": make_roster_id(class_id, pid),
                         "class_id": class_id,
                         "student_id": pid,
                     })
-                    roster_counter += 1
 
     return classes, rosters, warnings

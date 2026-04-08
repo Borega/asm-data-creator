@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, FluentIcon as FIF,
-    Pivot, PrimaryPushButton, PushButton, TableWidget,
+    ComboBox, MessageBox, Pivot, PrimaryPushButton, PushButton, TableWidget,
 )
 
 from diff_engine import DiffResult, DiffStatus, RowDiff
@@ -28,8 +28,8 @@ _COLOR_TEXT = QColor("#000000")  # force black text on all colored rows (dark th
 
 # ---- Tab configuration: (tab_key, tab_label, data_attr, key_columns) ----
 _TAB_DEFS = [
-    ("students", "Students", "students", ["person_id", "first_name", "last_name", "grade_level"]),
-    ("staff",    "Staff",    "staff",    ["person_id", "first_name", "last_name"]),
+    ("students", "Students", "students", ["person_id", "first_name", "last_name", "grade_level", "email_address"]),
+    ("staff",    "Staff",    "staff",    ["person_id", "person_number", "first_name", "last_name", "email_address"]),
     ("courses",  "Courses",  "courses",  ["course_id", "course_name", "location_id"]),
     ("classes",  "Classes",  "classes",  ["class_id", "class_number", "course_id", "instructor_id", "location_id"]),
     ("rosters",  "Rosters",  "rosters",  ["roster_id", "class_id", "student_id"]),
@@ -89,6 +89,10 @@ class _TabWidget(QWidget):
         self._approve_all_btn.clicked.connect(self._approve_all_changes)
         toolbar.addWidget(self._approve_all_btn)
 
+        self._approve_all_del_btn = PushButton("Approve All Deletions")
+        self._approve_all_del_btn.clicked.connect(self._approve_all_deletions)
+        toolbar.addWidget(self._approve_all_del_btn)
+
         layout.addLayout(toolbar)
 
         # --- Table ---
@@ -116,6 +120,9 @@ class _TabWidget(QWidget):
         """Callback to call whenever a DELETED checkbox is toggled."""
         self._gate_callback = cb
 
+    def set_row_height(self, px: int) -> None:
+        self._table.verticalHeader().setDefaultSectionSize(px)
+
     def populate(self, table_diff) -> None:
         """Populate table from a TableDiff. Resets all state."""
         self._row_metas.clear()
@@ -131,11 +138,14 @@ class _TabWidget(QWidget):
 
         self._update_summary()
         self._approve_all_btn.setVisible(self.n_changed > 0)
+        self._approve_all_del_btn.setVisible(self.n_deleted > 0)
         self._toggle_btn.setVisible(self.n_unchanged > 0)
 
     def _populate_row(self, row_idx: int, row_diff: RowDiff) -> None:
         status = row_diff.status
         data = row_diff.current if status != DiffStatus.DELETED else row_diff.snapshot
+        curr = row_diff.current or {}
+        snap = row_diff.snapshot or {}
         key_cols = self.key_columns
 
         color_map = {
@@ -147,8 +157,15 @@ class _TabWidget(QWidget):
         bg_color = color_map[status]
 
         for col_idx, col_name in enumerate(key_cols):
-            val = str(data.get(col_name, "") if data else "")
+            if status == DiffStatus.CHANGED:
+                old_val = str(snap.get(col_name, ""))
+                new_val = str(curr.get(col_name, ""))
+                val = new_val if old_val == new_val else f"Before: {old_val} | After: {new_val}"
+            else:
+                val = str(data.get(col_name, "") if data else "")
             item = QTableWidgetItem(val)
+            if status == DiffStatus.CHANGED:
+                item.setToolTip(val)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             if bg_color:
                 item.setBackground(bg_color)
@@ -257,6 +274,36 @@ class _TabWidget(QWidget):
                 meta.checkbox_item.setCheckState(Qt.CheckState.Checked)
         self._table.blockSignals(False)
 
+    def _approve_all_deletions(self) -> None:
+        """Check all DELETED checkboxes in this tab after explicit warning."""
+        total = sum(1 for m in self._row_metas if m.row_diff.status == DiffStatus.DELETED)
+        if total == 0:
+            return
+
+        box = MessageBox(
+            "Warning",
+            (
+                f"You are about to approve {total} deletion(s) at once.\n\n"
+                "This will remove these records from the export. Continue?"
+            ),
+            self,
+        )
+        if hasattr(box, "yesButton"):
+            box.yesButton.setText("Approve all deletions")
+        if hasattr(box, "cancelButton"):
+            box.cancelButton.setText("Cancel")
+        if not box.exec():
+            return
+
+        self._table.blockSignals(True)
+        for meta in self._row_metas:
+            if meta.row_diff.status == DiffStatus.DELETED and meta.checkbox_item:
+                meta.checkbox_item.setCheckState(Qt.CheckState.Checked)
+                meta.reviewed = True
+        self._table.blockSignals(False)
+        if self._gate_callback:
+            self._gate_callback()
+
     def count_unreviewed_deletions(self) -> int:
         return sum(
             1 for m in self._row_metas
@@ -298,6 +345,7 @@ class _TabWidget(QWidget):
 
 class DiffReviewPage(QWidget):
     export_requested = pyqtSignal()
+    upload_requested = pyqtSignal()
 
     def __init__(self, controller: "AppController | None" = None, parent=None):
         super().__init__(parent=parent)
@@ -306,6 +354,15 @@ class DiffReviewPage(QWidget):
         self._controller = controller
         self._tab_widgets: list[_TabWidget] = []
         self._diff_result: DiffResult | None = None
+        self._upload_available = False
+        self._upload_status = ""
+        self._row_size_map = {
+            "Compact": 24,
+            "Normal": 30,
+            "Comfortable": 36,
+            "Large": 44,
+        }
+        self._current_row_height = self._row_size_map["Normal"]
 
         self._init_ui()
 
@@ -324,6 +381,17 @@ class DiffReviewPage(QWidget):
         content_layout = QVBoxLayout(self._content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
+
+        size_row = QHBoxLayout()
+        size_row.setSpacing(8)
+        size_row.addWidget(CaptionLabel("Row size"))
+        self._row_size_combo = ComboBox(self)
+        self._row_size_combo.addItems(list(self._row_size_map.keys()))
+        self._row_size_combo.setCurrentText("Normal")
+        self._row_size_combo.currentTextChanged.connect(self._on_row_size_changed)
+        size_row.addWidget(self._row_size_combo)
+        size_row.addStretch()
+        content_layout.addLayout(size_row)
 
         # Pivot tab bar
         self._pivot = Pivot(self)
@@ -347,10 +415,17 @@ class DiffReviewPage(QWidget):
 
         # Activate first tab
         self._pivot.setCurrentItem(_TAB_DEFS[0][0])
+        self._apply_row_height(self._current_row_height)
 
         # Bottom bar: Export ZIP
         bottom_bar = QHBoxLayout()
         bottom_bar.addStretch()
+        self._upload_btn = PrimaryPushButton(FIF.SEND, "Create ZIP and Upload")
+        self._upload_btn.setEnabled(False)
+        self._upload_btn.setVisible(False)
+        self._upload_btn.clicked.connect(self._on_upload_clicked)
+        bottom_bar.addWidget(self._upload_btn)
+
         self._export_btn = PrimaryPushButton(FIF.SAVE, "Export ZIP")
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._on_export_clicked)
@@ -399,11 +474,22 @@ class DiffReviewPage(QWidget):
             result[data_attr] = tab_w.get_approved_records()
         return result
 
+    def set_upload_available(self, available: bool, reason: str = "") -> None:
+        self._upload_available = available
+        self._upload_status = reason or ""
+        self._upload_btn.setVisible(available)
+        self._upload_btn.setToolTip(self._upload_status if self._upload_status else "")
+        if self._diff_result is None:
+            self._upload_btn.setEnabled(False)
+            return
+        self._check_export_gate()
+
     def reset(self) -> None:
         """Return to placeholder state (called after successful export)."""
         self._diff_result = None
         self._content.hide()
         self._export_btn.setEnabled(False)
+        self._upload_btn.setEnabled(False)
         self._placeholder.show()
 
     # ------------------------------------------------------------------
@@ -414,7 +500,17 @@ class DiffReviewPage(QWidget):
         total_unreviewed = sum(
             tw.count_unreviewed_deletions() for tw in self._tab_widgets
         )
-        self._export_btn.setEnabled(total_unreviewed == 0)
+        gate_ok = total_unreviewed == 0
+        self._export_btn.setEnabled(gate_ok)
+        self._upload_btn.setEnabled(gate_ok and self._upload_available)
+
+    def _on_row_size_changed(self, label: str) -> None:
+        self._current_row_height = self._row_size_map.get(label, self._row_size_map["Normal"])
+        self._apply_row_height(self._current_row_height)
+
+    def _apply_row_height(self, px: int) -> None:
+        for tab_w in self._tab_widgets:
+            tab_w.set_row_height(px)
 
     # ------------------------------------------------------------------
     # Export ZIP
@@ -422,3 +518,6 @@ class DiffReviewPage(QWidget):
 
     def _on_export_clicked(self) -> None:
         self.export_requested.emit()
+
+    def _on_upload_clicked(self) -> None:
+        self.upload_requested.emit()

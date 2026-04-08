@@ -27,9 +27,13 @@ class TestSettingsStoreLoad:
         assert result["email_domain"] == ""
         assert result["teacher_aliases_path"] == ""
         assert result["subject_map_path"] == ""
+        assert result["sftp_username"] == ""
+        assert result["input_mode"] == "schuldock"
+        assert result["target_school_year"] == ""
         assert result["last_student_paths"] == []
         assert result["last_teacher_paths"] == []
         assert result["last_export_paths"] == []
+        assert result["last_monolith_paths"] == []
 
     def test_returns_defaults_on_corrupt_json(self, isolated_settings):
         settings_path = isolated_settings
@@ -46,9 +50,13 @@ class TestSettingsStoreLoad:
             "email_domain": "test.de",
             "teacher_aliases_path": "",
             "subject_map_path": "",
+            "sftp_username": "",
+            "input_mode": "legacy",
+            "target_school_year": "",
             "last_student_paths": [],
             "last_teacher_paths": [],
             "last_export_paths": [],
+            "last_monolith_paths": [],
         }
         settings_path.write_text(json.dumps(data), encoding="utf-8")
 
@@ -73,16 +81,24 @@ class TestSettingsStoreSave:
             "email_domain": "schule.de",
             "teacher_aliases_path": "/some/path.json",
             "subject_map_path": "",
+            "sftp_username": "upload_user",
+            "input_mode": "monolith",
+            "target_school_year": "2025/2026",
             "last_student_paths": ["/a/Student.csv"],
             "last_teacher_paths": [],
             "last_export_paths": ["/a/export1.csv", "/a/export2.csv"],
+            "last_monolith_paths": ["/a/Benutzer-Daten.csv"],
         }
         SettingsStore.save(data)
         loaded = SettingsStore.load()
         assert loaded["location_id"] == "R999"
         assert loaded["email_domain"] == "schule.de"
+        assert loaded["sftp_username"] == "upload_user"
+        assert loaded["input_mode"] == "monolith"
+        assert loaded["target_school_year"] == "2025/2026"
         assert loaded["last_student_paths"] == ["/a/Student.csv"]
         assert loaded["last_export_paths"] == ["/a/export1.csv", "/a/export2.csv"]
+        assert loaded["last_monolith_paths"] == ["/a/Benutzer-Daten.csv"]
 
     def test_creates_parent_directory(self, tmp_path, monkeypatch):
         """Save should create the data dir if it does not exist."""
@@ -114,11 +130,13 @@ class TestSettingsStoreSave:
         """German characters round-trip without garbling."""
         data = {k: "" for k in [
             "location_id", "email_domain", "teacher_aliases_path",
-            "subject_map_path",
+            "subject_map_path", "sftp_username", "target_school_year",
         ]}
+        data["input_mode"] = "legacy"
         data["last_student_paths"] = []
         data["last_teacher_paths"] = []
         data["last_export_paths"] = []
+        data["last_monolith_paths"] = []
         data["email_domain"] = "schüler-räume.de"
 
         SettingsStore.save(data)

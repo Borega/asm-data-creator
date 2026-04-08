@@ -34,6 +34,8 @@ class GeneratorWorker(QRunnable):
         student_paths: list[str],
         teacher_paths: list[str],
         export_paths: list[str],
+        input_mode: str = "legacy",
+        monolith_paths: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.signals = _WorkerSignals()
@@ -41,6 +43,8 @@ class GeneratorWorker(QRunnable):
         self._student_paths = student_paths
         self._teacher_paths = teacher_paths
         self._export_paths = export_paths
+        self._input_mode = input_mode
+        self._monolith_paths = monolith_paths or []
 
     @staticmethod
     def _normalise_staff_rows(rows: list[dict]) -> list[dict]:
@@ -104,6 +108,8 @@ class GeneratorWorker(QRunnable):
                 self._student_paths,
                 self._export_paths,
                 existing_staff=existing_staff,
+                input_mode=self._input_mode,
+                monolith_paths=self._monolith_paths,
             )
             self.signals.progress.emit(100)
             self.signals.finished.emit(result)

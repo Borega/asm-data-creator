@@ -14,3 +14,36 @@ def make_student_tsv(rows: list) -> str:
             f"{r.get('foreName','')}\t{r.get('klasse.name','')}\n"
         )
     return "".join(lines)
+
+
+MONOLITH_HEADER = (
+    "Nachname;Vorname;Rufname;Geburtstag;Geschlecht;Kürzel;Klassen;Klassennamen;Angebote;"
+    "Manuelle Gruppen;E-Mail-Adressen der weiteren Schulen;Rolle;Interne ID;Export ID;Gültig bis;Löschdatum\n"
+)
+
+
+def make_monolith_csv(rows: list[dict]) -> str:
+    """Build a semicolon-separated monolith CSV string."""
+    fields = [
+        "Nachname",
+        "Vorname",
+        "Rufname",
+        "Geburtstag",
+        "Geschlecht",
+        "Kürzel",
+        "Klassen",
+        "Klassennamen",
+        "Angebote",
+        "Manuelle Gruppen",
+        "E-Mail-Adressen der weiteren Schulen",
+        "Rolle",
+        "Interne ID",
+        "Export ID",
+        "Gültig bis",
+        "Löschdatum",
+    ]
+    lines = [MONOLITH_HEADER]
+    for row in rows:
+        vals = [str(row.get(k, "")) for k in fields]
+        lines.append(";".join(vals) + "\n")
+    return "".join(lines)

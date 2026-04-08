@@ -45,6 +45,11 @@ class MainWindow(FluentWindow):
             position=NavigationItemPosition.BOTTOM,
         )
 
+        if self._controller.should_open_settings_on_startup():
+            self.switchTo(self._settings_page)
+        else:
+            self.switchTo(self._input_page)
+
     def switchTo(self, page) -> None:
         """Navigate to a sub-interface page (called by AppController)."""
         self.stackedWidget.setCurrentWidget(page)

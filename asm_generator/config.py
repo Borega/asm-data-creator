@@ -12,6 +12,8 @@ class GeneratorConfig:
     email_domain: str
     aliases_path: str          # Path to teacher_aliases.json
     subjects_path: str         # Path to subject_map.json
+    input_mode: str = "schuldock"       # schuldock | legacy (legacy alias: monolith)
+    target_school_year: str = ""        # e.g. 2025/2026; empty = no filter
 
     # Loaded lazily on first access by from_json(); also set when loading from JSON.
     _aliases: dict = field(default_factory=dict, repr=False)
@@ -40,6 +42,8 @@ class GeneratorConfig:
             email_domain=data["email_domain"],
             aliases_path=data["aliases_path"],
             subjects_path=data["subjects_path"],
+            input_mode=data.get("input_mode", "schuldock"),
+            target_school_year=data.get("target_school_year", ""),
         )
 
     def load_aliases(self) -> dict:

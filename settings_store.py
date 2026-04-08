@@ -18,9 +18,13 @@ _DEFAULTS: dict = {
     "email_domain": "",
     "teacher_aliases_path": "",
     "subject_map_path": "",
+    "sftp_username": "",
+    "input_mode": "schuldock",
+    "target_school_year": "",
     "last_student_paths": [],
     "last_teacher_paths": [],
     "last_export_paths": [],
+    "last_monolith_paths": [],
 }
 
 
