@@ -1,0 +1,40 @@
+[project]
+name = "asm-generator"
+version = "0.1.0"
+description = "Apple School Manager CSV exporter"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+    "build",
+    "dist",
+    "asm_generator/__pycache__",
+    "api",
+    ".planning",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",   # line length — soft cap via formatter, not lint
+    "B008",   # function calls in default arg (common Qt/dataclass pattern)
+    "SIM108", # ternary preference — not always more readable
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # allow asserts in tests
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
