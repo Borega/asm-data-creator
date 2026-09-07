@@ -25,7 +25,7 @@ from asm_generator import GeneratorConfig, GeneratorResult
 from backup_store import create_backup
 from diff_baseline import load_baseline_from_csv_source
 from diff_engine import compute_diff
-from gui.workers import GeneratorWorker
+from gui.workers import GeneratorWorker, SftpStatusWorker
 from settings_store import SettingsStore
 from sftp_client import check_connection as check_sftp_connection
 from sftp_client import upload_file
@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 
 class AppController:
+    SFTP_CHECK_PENDING_MESSAGE = "Checking SFTP connection…"
+
     @staticmethod
     def _normalize_input_mode(mode: str) -> str:
         m = (mode or "").strip().lower()
@@ -108,14 +110,16 @@ class AppController:
         self._last_result: GeneratorResult | None = None
         self._sftp_ready = False
         self._sftp_status_message = "SFTP not configured."
+        self._sftp_check_token = 0
 
         # Page references — set after pages are created (call set_pages())
         self._input_page = None
         self._diff_page = None
         self._settings_page = None
 
-        # Validate upload capability once during startup.
-        self._refresh_sftp_status(check_connection=True)
+        # Validate upload capability once during startup — off the GUI thread so
+        # an unreachable SFTP host cannot delay the window appearing.
+        self._start_sftp_status_check()
 
     def set_pages(self, input_page, diff_page, settings_page) -> None:
         """Called by MainWindow after all pages are instantiated."""
@@ -154,6 +158,8 @@ class AppController:
         return not self._has_sftp_credentials()
 
     def save_sftp_credentials(self, old_username: str, new_username: str, password: str) -> tuple[bool, str]:
+        # The user is changing credentials — retire any probe still in flight.
+        self._sftp_check_token += 1
         old_username = (old_username or "").strip()
         new_username = (new_username or "").strip()
         password = password or ""
@@ -388,28 +394,43 @@ class AppController:
         except CredentialError:
             return False
 
-    def _refresh_sftp_status(self, check_connection: bool) -> None:
+    def _resolve_sftp_credentials(self) -> tuple[str, str, str]:
+        """Return ``(username, password, error)`` without touching the network.
+
+        ``error`` is empty when both username and password are available;
+        otherwise it carries the status message explaining what is missing.
+        """
         username = (self._settings.get("sftp_username", "") or "").strip()
         if not username:
-            self._sftp_ready = False
-            self._sftp_status_message = "Missing SFTP username."
-            return
+            return "", "", "Missing SFTP username."
 
         if not is_keyring_available():
-            self._sftp_ready = False
-            self._sftp_status_message = "Secure keyring backend is unavailable."
-            return
+            return username, "", "Secure keyring backend is unavailable."
 
         try:
             password = get_password(username)
         except CredentialError as exc:
-            self._sftp_ready = False
-            self._sftp_status_message = f"Credential error: {exc}"
-            return
+            return username, "", f"Credential error: {exc}"
 
         if not password:
+            return username, "", "Missing SFTP password."
+
+        return username, password, ""
+
+    def _refresh_sftp_status(self, check_connection: bool) -> None:
+        """Recompute upload readiness.
+
+        With ``check_connection=True`` this blocks for up to
+        ``sftp_client._CONNECT_TIMEOUT`` seconds, so only call it from an
+        explicit user action (Save / Test Connection).  Startup uses
+        :meth:`_start_sftp_status_check` instead.
+        """
+        # This result is authoritative — retire any probe still in flight.
+        self._sftp_check_token += 1
+        username, password, error = self._resolve_sftp_credentials()
+        if error:
             self._sftp_ready = False
-            self._sftp_status_message = "Missing SFTP password."
+            self._sftp_status_message = error
             return
 
         if check_connection:
@@ -418,6 +439,44 @@ class AppController:
         else:
             self._sftp_ready = True
             self._sftp_status_message = "SFTP credentials available."
+
+    def _start_sftp_status_check(self) -> bool:
+        """Probe the SFTP server on a worker thread.  Never blocks the caller.
+
+        The probe is a blocking TCP connect with a 15 s timeout; running it
+        inline froze the window for the full timeout on networks that filter
+        outbound port 22.  Returns True if a probe was dispatched, False if a
+        credential prerequisite was missing (status is then already final).
+        """
+        # Any probe still in flight is superseded by this one.
+        self._sftp_check_token += 1
+
+        username, password, error = self._resolve_sftp_credentials()
+        if error:
+            self._sftp_ready = False
+            self._sftp_status_message = error
+            self._refresh_upload_ui_state()
+            return False
+
+        # Upload stays disabled while the probe is in flight — readiness is unknown.
+        self._sftp_ready = False
+        self._sftp_status_message = self.SFTP_CHECK_PENDING_MESSAGE
+        self._refresh_upload_ui_state()
+
+        worker = SftpStatusWorker(
+            check_sftp_connection, username, password, self._sftp_check_token
+        )
+        worker.signals.finished.connect(self._on_sftp_check_finished)
+        worker.start()
+        return True
+
+    def _on_sftp_check_finished(self, token: int, ready: bool, message: str) -> None:
+        """Apply a probe result on the GUI thread; drop superseded probes."""
+        if token != self._sftp_check_token:
+            return
+        self._sftp_ready = ready
+        self._sftp_status_message = message
+        self._refresh_upload_ui_state()
 
     def _refresh_upload_ui_state(self) -> None:
         if self._diff_page is not None:

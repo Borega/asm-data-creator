@@ -534,6 +534,7 @@ python -m pytest tests/ -v --cov=asm_generator --cov=gui --cov-report=html
 |---------|--------|
 | **„No Qt platform plugin could be initialized“** | `set QT_DEBUG_PLUGINS=1` setzen und Pfad prüfen |
 | **„Authentication failed“ beim SFTP** | Zugangsdaten in Settings prüfen, „Test SFTP Connection“ ausführen |
+| **Status bleibt auf „Checking SFTP connection…“** | Die Verbindungsprüfung läuft im Hintergrund (max. 15 s) und blockiert das Fenster nicht. Bleibt es bei „Connection timed out“, blockiert das Netzwerk ausgehenden Port 22 – Export und ZIP funktionieren weiterhin, nur der Upload ist deaktiviert. |
 | **„paramiko is not installed“** | `pip install paramiko` ausführen |
 | **CSV wird nicht erkannt / Encoding-Fehler** | Die App erkennt automatisch UTF-8, UTF-8-SIG und (via chardet) andere Encodings |
 | **Snapshot beschädigt** | `%LOCALAPPDATA%\ASMGenerator\snapshot.json` löschen – die App behandelt den nächsten Lauf als Ersteinrichtung |

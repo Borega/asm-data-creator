@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -125,3 +126,56 @@ class GeneratorWorker(QRunnable):
             self.signals.finished.emit(result)
         except Exception as exc:  # noqa: BLE001
             self.signals.error.emit(str(exc))
+
+
+class _SftpStatusSignals(QObject):
+    finished = pyqtSignal(int, bool, str)  # token, ready, message
+
+
+class SftpStatusWorker:
+    """Probes the ASM SFTP server off the GUI thread.
+
+    Dispatch with :meth:`start`.
+
+    Deliberately a daemon ``threading.Thread`` rather than a QRunnable on the
+    global QThreadPool: the probe is a blocking TCP connect with a 15 s timeout
+    that cannot be cancelled, and QThreadPool waits for its runnables during
+    teardown — pooling it would move the freeze from startup to shutdown.  A
+    daemon thread lets the process exit immediately instead.
+
+    ``signals`` is constructed on the calling (GUI) thread, so ``finished`` is
+    queued back to that thread even though it is emitted from the worker.
+
+    ``token`` is echoed back in ``finished`` so the controller can discard the
+    result of a probe that a newer one has superseded.
+    """
+
+    def __init__(self, check_fn, username: str, password: str, token: int) -> None:
+        self.signals = _SftpStatusSignals()
+        self._check_fn = check_fn
+        self._username = username
+        self._password = password
+        self._token = token
+
+    def start(self) -> None:
+        threading.Thread(
+            target=self.run, name=f"sftp-status-probe-{self._token}", daemon=True
+        ).start()
+
+    def run(self) -> None:
+        try:
+            result = self._check_fn(self._username, self._password)
+        except Exception as exc:  # noqa: BLE001 - a probe must never kill its thread
+            logger.warning("SFTP status probe failed: %s", exc, exc_info=exc)
+            self.signals.finished.emit(self._token, False, f"Connection error: {exc}")
+            return
+
+        if isinstance(result, tuple) and len(result) == 2:
+            ready, message = result
+            self.signals.finished.emit(
+                self._token,
+                ready is True,
+                str(message or "Unexpected SFTP connection response."),
+            )
+        else:
+            self.signals.finished.emit(self._token, False, "Unexpected SFTP connection response.")
