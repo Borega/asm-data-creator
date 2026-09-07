@@ -149,9 +149,14 @@ class AppController:
         return self._settings
 
     def reload_settings(self) -> None:
-        """Called by SettingsPage after save; refreshes in-memory settings."""
+        """Called by SettingsPage after save; refreshes in-memory settings.
+
+        Deliberately does not re-probe the SFTP host.  SettingsPage.save() calls
+        :meth:`save_sftp_credentials` first, which has already run a check and
+        set an authoritative status, so probing again only doubled the freeze on
+        an unreachable host — 30 s of frozen UI for one Save click.
+        """
         self._settings = SettingsStore.load()
-        self._refresh_sftp_status(check_connection=True)
         self._refresh_upload_ui_state()
 
     def should_open_settings_on_startup(self) -> bool:

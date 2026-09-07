@@ -99,28 +99,40 @@ def test_refresh_status_without_connection_marks_credentials_available(controlle
     assert controller.get_sftp_status() == (True, "SFTP credentials available.")
 
 
-def test_reload_settings_recomputes_status_and_refreshes_page_state(controller, monkeypatch: pytest.MonkeyPatch):
+def test_reload_settings_reloads_settings_and_refreshes_page_state(controller, monkeypatch: pytest.MonkeyPatch):
     diff_page = _PageDouble()
     settings_page = _PageDouble()
     controller._diff_page = diff_page
     controller._settings_page = settings_page
+    connected = "Connected to upload.appleschoolcontent.com:22 as 'upload-user'."
+    controller._sftp_ready = True
+    controller._sftp_status_message = connected
 
-    monkeypatch.setattr(ac_module.SettingsStore, "load", lambda: {"sftp_username": "upload-user"})
-    monkeypatch.setattr(ac_module, "get_password", lambda _username: "secret")
     monkeypatch.setattr(
-        ac_module,
-        "check_sftp_connection",
-        lambda _username, _password: (True, "Connected to upload.appleschoolcontent.com:22 as 'upload-user'."),
+        ac_module.SettingsStore,
+        "load",
+        lambda: {"sftp_username": "upload-user", "location_id": "R002"},
     )
 
     controller.reload_settings()
 
-    assert controller.get_sftp_status() == (
-        True,
-        "Connected to upload.appleschoolcontent.com:22 as 'upload-user'.",
-    )
-    assert diff_page.calls[-1] == (True, "Connected to upload.appleschoolcontent.com:22 as 'upload-user'.")
-    assert settings_page.calls[-1] == (True, "Connected to upload.appleschoolcontent.com:22 as 'upload-user'.")
+    assert controller.get_settings()["location_id"] == "R002"
+    assert controller.get_sftp_status() == (True, connected)
+    assert diff_page.calls[-1] == (True, connected)
+    assert settings_page.calls[-1] == (True, connected)
+
+
+def test_reload_settings_does_not_reprobe_the_sftp_host(controller, monkeypatch: pytest.MonkeyPatch):
+    """SettingsPage.save() probes via save_sftp_credentials(); a second probe froze the UI twice."""
+    monkeypatch.setattr(ac_module.SettingsStore, "load", lambda: {"sftp_username": "upload-user"})
+    monkeypatch.setattr(ac_module, "get_password", lambda _username: "secret")
+
+    def _must_not_run(_username: str, _password: str):
+        raise AssertionError("reload_settings re-probed the SFTP host")
+
+    monkeypatch.setattr(ac_module, "check_sftp_connection", _must_not_run)
+
+    controller.reload_settings()
 
 
 def test_save_credentials_clears_when_username_blank(controller):
