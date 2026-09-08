@@ -1,8 +1,8 @@
 """Tests for asm_generator.parsers — LIB-01, LIB-02, LIB-06."""
 import pytest
-from tests.conftest import make_student_tsv, make_monolith_csv
-from asm_generator.parsers import parse_students, parse_export, parse_monolith
 
+from asm_generator.parsers import parse_export, parse_monolith, parse_students
+from tests.conftest import make_monolith_csv, make_student_tsv
 
 # ---------------------------------------------------------------------------
 # parse_students — basic
@@ -60,16 +60,16 @@ def test_parse_students_cp1252_fallback(tmp_path):
         {"externKey": str(3000 + i), "longName": name, "foreName": fore, "klasse.name": klass}
         for i, (name, fore, klass) in enumerate([
             ("Wäßler", "Günter", "9d"), ("Müller", "Jürgen", "8a"),
-            ("Schröder", "Björn", "7b"), ("Köhler", "Käthe", "6c"),
+            ("Falkenberg", "Björn", "7b"), ("Köhler", "Käthe", "6c"),
             ("Bäcker", "Sören", "5a"), ("Grünwald", "Löwe", "10a"),
             ("Wäßler", "Günter", "9d"), ("Müller", "Jürgen", "8a"),
-            ("Schröder", "Björn", "7b"), ("Köhler", "Käthe", "6c"),
+            ("Falkenberg", "Björn", "7b"), ("Köhler", "Käthe", "6c"),
             ("Bäcker", "Sören", "5a"), ("Grünwald", "Löwe", "10a"),
-            ("Straßner", "Björn", "11b"), ("Kühn", "André", "12a"),
+            ("Straßner", "Björn", "11b"), ("Sonntag", "André", "12a"),
             ("Lörz", "Stéphane", "9c"), ("Großmann", "Clémence", "8b"),
             ("Häußler", "Ügür", "7a"), ("Pöttger", "Björn", "6b"),
             ("Wäßmann", "Günther", "5c"), ("Schütz", "Ödön", "10b"),
-            ("Straßner", "Björn", "11b"), ("Kühn", "André", "12a"),
+            ("Straßner", "Björn", "11b"), ("Sonntag", "André", "12a"),
             ("Lörz", "Stéphane", "9c"), ("Großmann", "Clémence", "8b"),
             ("Häußler", "Ügür", "7a"), ("Pöttger", "Björn", "6b"),
         ] * 2)
@@ -341,3 +341,125 @@ def test_parse_monolith_uses_rufname_for_section_rows(tmp_path):
     )
     result = parse_monolith([csv_file], target_school_year="2025/2026")
     assert result["sections"][0]["rows"][0]["vorname"] == "Max"
+
+
+# ---------------------------------------------------------------------------
+# parse_monolith — 2026 Schuldock schema (renamed columns)
+# ---------------------------------------------------------------------------
+
+_NEW_HEADER = (
+    "Nachname;Nachname Kurzform;Vorname;Rufname;Geburtsdatum;Geschlecht;Kürzel;"
+    "Schulen;Stammschule;Schulform;Jahrgangsstufe;Benutzerkennung;"
+    "Weitere E-Mail-Adressen;E-Mail-Aliasse;Klassen (aktiv);"
+    "Klassen (aktiv) interner Gruppenname;Klassen (alle);"
+    "Klassen (alle) interner Gruppenname;Angebote;Manuelle Gruppen;Status;Rolle;"
+    "Quelle;Interne ID;Export ID;Gültig ab;Gültig bis;Löschdatum"
+)
+
+
+def _new_schema_csv(rows: list[dict]) -> str:
+    fields = _NEW_HEADER.split(";")
+    lines = [_NEW_HEADER]
+    lines.extend(";".join(str(r.get(f, "")) for f in fields) for r in rows)
+    return "\n".join(lines) + "\n"
+
+
+def test_parse_monolith_reads_renamed_2026_columns(tmp_path):
+    """Klassen (aktiv), Jahrgangsstufe, Benutzerkennung, Weitere E-Mail-Adressen."""
+    csv_file = tmp_path / "monolith_2026.csv"
+    csv_file.write_text(
+        _new_schema_csv(
+            [
+                {
+                    "Nachname": "Schulz",
+                    "Vorname": "Nina",
+                    "Jahrgangsstufe": "7",
+                    "Klassen (aktiv)": "7a",
+                    "Klassen (alle)": "7a,6a",
+                    "Benutzerkennung": "nina.schulz@rissen.hamburg.de",
+                    "Weitere E-Mail-Adressen": "nina.schulz@rissen.hamburg.de",
+                    "Angebote": "7a Sp-2026/2027-Angebot-rissen",
+                    "Rolle": "Lernende",
+                    "Interne ID": "stu-n1",
+                },
+                {
+                    "Nachname": "Lehrer",
+                    "Vorname": "Ole",
+                    "Kürzel": "Ole",
+                    "Klassen (aktiv)": "7a",
+                    "Benutzerkennung": "ole.lehrer@rissen.hamburg.de",
+                    "Angebote": "7a Sp-2026/2027-Angebot-rissen",
+                    "Rolle": "Lehrkraft",
+                    "Interne ID": "tea-n1",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = parse_monolith([csv_file], target_school_year="2026/2027")
+
+    student = result["students"][0]
+    assert student["class_name"] == "7a"  # read "" once Klassennamen disappeared
+    assert student["jahrgangsstufe"] == "7"
+    assert student["anmeldekennung"] == "nina.schulz@rissen.hamburg.de"
+    assert student["email"] == "nina.schulz@rissen.hamburg.de"
+    assert result["sections"][0]["angebotsname"] == "7a Sp"
+    assert result["warnings"] == []
+
+
+def test_parse_monolith_autodetects_year_from_offers(tmp_path):
+    """Year detection moved off the removed 'Klassen' column onto the offer tokens."""
+    csv_file = tmp_path / "monolith_years.csv"
+    csv_file.write_text(
+        _new_schema_csv(
+            [
+                {
+                    "Nachname": "Alt",
+                    "Vorname": "Anna",
+                    "Klassen (aktiv)": "8a",
+                    "Angebote": "8a Ma-2025/2026-Angebot-rissen",
+                    "Rolle": "Lernende",
+                    "Interne ID": "stu-old",
+                },
+                {
+                    "Nachname": "Neu",
+                    "Vorname": "Nora",
+                    "Klassen (aktiv)": "8a",
+                    "Angebote": "8a Ma-2026/2027-Angebot-rissen,8a D-2026/2027-Angebot-rissen",
+                    "Rolle": "Lernende",
+                    "Interne ID": "stu-new",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = parse_monolith([csv_file], target_school_year="")
+
+    # 2026/2027 outnumbers 2025/2026, so only its offers survive.
+    assert {s["angebotsname"] for s in result["sections"]} == {"8a Ma", "8a D"}
+    assert next(s for s in result["students"] if s["nachname"] == "Alt")["offers"] == []
+
+
+def test_parse_monolith_warns_when_class_column_disappears(tmp_path):
+    """A renamed column reads as empty for every row — that must not stay silent."""
+    csv_file = tmp_path / "monolith_noclass.csv"
+    header = _NEW_HEADER.replace("Klassen (aktiv);", "Klassen (umbenannt);")
+    row = {
+        "Nachname": "Schulz",
+        "Vorname": "Nina",
+        "Jahrgangsstufe": "7",
+        "Angebote": "7a Sp-2026/2027-Angebot-rissen",
+        "Rolle": "Lernende",
+        "Interne ID": "stu-n1",
+    }
+    fields = header.split(";")
+    csv_file.write_text(
+        header + "\n" + ";".join(str(row.get(f, "")) for f in fields) + "\n",
+        encoding="utf-8",
+    )
+
+    result = parse_monolith([csv_file], target_school_year="2026/2027")
+
+    assert any("no student class names found" in w for w in result["warnings"])

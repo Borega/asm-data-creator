@@ -1,8 +1,5 @@
 """Tests for SettingsStore — persistence, defaults, and atomic write."""
 import json
-import os
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 

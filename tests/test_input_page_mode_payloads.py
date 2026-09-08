@@ -24,6 +24,9 @@ class _ControllerStub:
     def get_settings(self) -> dict:
         return {"email_domain": "example.org"}
 
+    def missing_required_settings(self) -> list[str]:
+        return []  # a fully configured install, so Run is not blocked
+
 
 def test_schuldock_run_ignores_hidden_teacher_paths(qapp: QApplication):
     page = InputPage(controller=_ControllerStub())

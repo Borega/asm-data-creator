@@ -14,6 +14,7 @@ from asm_generator.transform import (
     build_course_records,
     build_student_records_monolith,
     build_teacher_records,
+    drop_duplicate_classes,
 )
 
 _REQUIRED_FILES = ("students.csv", "staff.csv", "courses.csv", "classes.csv", "rosters.csv")
@@ -130,13 +131,19 @@ def _load_from_monolith_csv(path: Path, config: GeneratorConfig) -> GeneratorRes
         config,
     )
 
+    # Must match generate(), or every de-duplicated class reads as a deletion.
+    courses, classes, rosters, dedupe_warnings = drop_duplicate_classes(
+        list(courses_map.values()), classes, rosters
+    )
+
     warnings = list(parsed.get("warnings", []))
     warnings.extend(build_warnings)
+    warnings.extend(dedupe_warnings)
 
     return GeneratorResult(
         students=student_records,
         staff=list(teacher_records.values()),
-        courses=list(courses_map.values()),
+        courses=courses,
         classes=classes,
         rosters=rosters,
         warnings=warnings,

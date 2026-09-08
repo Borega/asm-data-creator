@@ -28,6 +28,24 @@ UMLAUT_MAP = str.maketrans({
     "ą": "a", "ś": "s", "ź": "z",
 })
 
+def _domain(config) -> str:
+    """The school's Managed Apple Account domain, normalised.
+
+    Every school has its own, so this is configuration and never a constant.
+    There is deliberately no default: a blank domain used to fall through to a
+    hardcoded 'rissen.hamburg.de', which would hand one school's addresses to
+    another school's students — silently, and only visible once the accounts
+    exist. Refusing to generate is the lesser failure.
+    """
+    value = (getattr(config, "email_domain", "") or "").strip().lstrip("@").lower()
+    if not value:
+        raise ValueError(
+            "No email domain configured. Set your school's Managed Apple Account "
+            "domain (Settings → Email Domain), for example 'school.example', "
+            "before generating."
+        )
+    return value
+
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
@@ -47,65 +65,65 @@ def make_person_id_parts(first_name: str, last_name: str) -> tuple:
     return first_part, last_part
 
 
-def _make_email(first_name: str, last_name: str, domain: str) -> str:
-    """Build a firstname.lastname@<domain> email for the configured domain.
-
-    Returns an empty string when no email domain is configured.
-    """
-    if not domain:
-        return ""
+def _email_local_from_name(first_name: str, last_name: str) -> str:
+    """The firstname.lastname part of an address, with fallbacks for missing halves."""
     fp, lp = make_person_id_parts(first_name, last_name)
     if fp and lp:
-        local = f"{fp}.{lp}"
-    elif fp:
-        local = f"{fp}.unknown"
-    elif lp:
-        local = f"unknown.{lp}"
-    else:
-        local = "unknown.unknown"
-    return f"{local}@{domain}"
+        return f"{fp}.{lp}"
+    if fp:
+        return f"{fp}.unknown"
+    if lp:
+        return f"unknown.{lp}"
+    return "unknown.unknown"
+
+
+def _make_email(first_name: str, last_name: str, domain: str) -> str:
+    """Build canonical ASM email in firstname.lastname@<domain> form."""
+    return f"{_email_local_from_name(first_name, last_name)}@{domain}"
 
 
 def _validate_email(email: str, domain: str) -> str | None:
-    """Validate email address against the configured domain.
+    """Validate email address.
 
     Rules:
-    - Must end in @<domain> (only the configured domain is accepted)
-    - Return the email if valid, None if invalid, missing, or no domain configured
+    - Must end in @<domain> (only the school's own domain is accepted)
+    - Return the email if valid, None if invalid or missing
     """
-    if not email or not domain:
+    if not email:
         return None
     email = email.strip()
     if not email:
         return None
-    if email.lower().endswith(f"@{domain.lower()}"):
+    if email.lower().endswith(f"@{domain}"):
         return email
     # Invalid domain: reject
     return None
 
 
 def _get_email_for_staff(
-    person_id: str,
+    email_local: str,
     existing_email: str | None,
     first_name: str,
     last_name: str,
     domain: str,
 ) -> str:
     """Determine email for a staff member.
-
+    
     Rules:
-    1. If existing email is valid (@<domain>): use it (even if it doesn't match name)
-    2. If existing email is invalid or missing: generate from person_id@<domain>
+    1. If existing email is on the school's domain: use it (even if it doesn't match the name)
+    2. Otherwise: build one from *email_local*
 
     Args:
-        person_id: The derived person_id for this staff member
+        email_local: The local part to use when generating. With name-derived
+            ids this is the person_id itself, which is already firstname.lastname.
+            With uuid ids it must be the name-derived local part instead — an
+            address like 65c1f2b8-...@school.de is not usable by a human.
         existing_email: Email from prior record (if any)
         first_name: First name (for fallback generation)
         last_name: Last name (for fallback generation)
-        domain: Configured email domain (empty disables email generation)
 
     Returns:
-        Valid email address ending in @<domain>, or empty string if no domain configured.
+        Valid email address on *domain*
     """
     # Validate existing email
     if existing_email:
@@ -113,10 +131,8 @@ def _get_email_for_staff(
         if validated:
             return validated
 
-    # No valid existing email: generate from person_id
-    if not domain:
-        return ""
-    return f"{person_id}@{domain}"
+    # No valid existing email: generate one
+    return f"{email_local}@{domain}"
 
 
 
@@ -133,13 +149,7 @@ def _build_canonical_email_from_source_or_name(
     last_name: str,
     domain: str,
 ) -> str:
-    """Prefer source email local-part; always emit the configured email domain.
-
-    Returns an empty string when no email domain is configured.
-    """
-    if not domain:
-        return ""
-
+    """Prefer source email local-part; always emit the school's own domain."""
     candidates = _extract_email_candidates(source_email_raw)
 
     for candidate in candidates:
@@ -189,6 +199,36 @@ def _derive_staff_person_id(first_name: str, last_name: str, person_number: str 
     return "staff.unknown"
 
 
+def _split_given_names(first: str) -> tuple[str, str]:
+    """Split 'Anna Maria Theresa' into ('Anna', 'Maria Theresa').
+
+    Schuldock switched to exporting full given names, which otherwise land
+    whole in staff.first_name. Students are already split this way; person_id
+    is unaffected because it only ever used the leading token.
+    """
+    tokens = (first or "").split()
+    if not tokens:
+        return "", ""
+    return tokens[0], " ".join(tokens[1:])
+
+
+def resolve_staff_identity(row: dict, aliases: dict) -> tuple[str, str, str, str]:
+    """Return ``(first, last, person_number, person_id)`` for a staff seed row.
+
+    Shared by :func:`build_teacher_records` and by pin seeding so the two can
+    never disagree about which id a teacher would be given — a seed that
+    computed a different id than the generator would pin the wrong account.
+    """
+    first_source = _clean_teacher_first_name(row.get("first_name", row.get("foreName", "")))
+    last_source = (row.get("last_name", row.get("longName", "")) or "").strip()
+    first, last = aliases.get((first_source, last_source), (first_source, last_source))
+    first = _clean_teacher_first_name(first)
+    person_number = (
+        row.get("person_number", row.get("name", row.get("pnr", ""))) or ""
+    ).strip()
+    return first, last, person_number, _derive_staff_person_id(first, last, person_number)
+
+
 def _clean_teacher_first_name(value: str) -> str:
     """Remove digits/symbols from teacher first names while preserving letters."""
     s = (value or "").strip()
@@ -212,14 +252,87 @@ def extract_grade_level(klasse: str) -> str:
     return ""
 
 
+# Parallel-group and Kurs-level markers that trail a subject: '11 Phy 1',
+# '12 D 2 eA', '13c E_SS 3'. They are kept in the output name so two groups of
+# the same subject stay tellable apart.
+_SUBJECT_VARIANT_RE = re.compile(r"^(?:\d+|[eg]A)$")
+
+# Oberstufe suffixes: 'Bio_SS' is Biologie in the Studienstufe (years 12-13).
+_SUBJECT_STAGE_SUFFIXES = {"_SS": "Studienstufe"}
+
+
+def _split_subject_variants(subject: str) -> tuple[str, str]:
+    """Split 'Phy 1' into ('Phy', '1'), leaving unrecognised tails on the base."""
+    tokens = subject.split()
+    tail: list[str] = []
+    while len(tokens) > 1 and _SUBJECT_VARIANT_RE.match(tokens[-1]):
+        tail.insert(0, tokens.pop())
+    return " ".join(tokens), " ".join(tail)
+
+
+def _lookup_subject(base: str, lookup: dict) -> str | None:
+    """Resolve a subject token to its full name, or None if unrecognised.
+
+    *lookup* is a case-folded subject map (see :func:`expand_angebotsname`);
+    the source spells the same token both ways ('WP1 Spa' / 'Wp1 Spa').
+
+    Handles three shapes beyond a plain hit:
+      'Bio_SS'         -> underscore stage suffix ('Biologie Studienstufe')
+      'Mu_5-10'        -> unknown suffix kept verbatim ('Musik 5-10')
+      'L:AB Holz Wolke' -> longest known leading subject, remainder kept
+    """
+    hit = lookup.get(base.lower())
+    if hit is not None:
+        return hit
+
+    if "_" in base:
+        stem, _, suffix = base.rpartition("_")
+        stem_full = _lookup_subject(stem, lookup) if stem else None
+        if stem_full:
+            stage = _SUBJECT_STAGE_SUFFIXES.get("_" + suffix.upper(), suffix)
+            return f"{stem_full} {stage}"
+
+    tokens = base.split()
+    for cut in range(len(tokens) - 1, 0, -1):
+        head = lookup.get(" ".join(tokens[:cut]).lower())
+        if head is not None:
+            return f"{head} {' '.join(tokens[cut:])}"
+
+    return None
+
+
 def expand_angebotsname(angebotsname: str, subject_map: dict) -> str:
-    """Expand subject abbreviation in Angebotsname to full German name."""
-    parts = angebotsname.split(" ", 1)
-    if len(parts) < 2:
+    """Expand subject abbreviation in Angebotsname to full German name.
+
+    Unknown subjects are returned untouched rather than guessed at.
+    """
+    # Leading '#'/'##'/'###' is Schuldock decoration on the offer name, not part
+    # of the class. Only the display name loses it — course_number and the
+    # course_id derived from it keep the original string, so identity is stable.
+    display_name = angebotsname.lstrip("#").strip()
+    if not display_name:
         return angebotsname
+
+    parts = display_name.split(" ", 1)
+    if len(parts) < 2:
+        return display_name
     class_prefix, subject_abbr = parts[0], parts[1]
-    subject_full = subject_map.get(subject_abbr, subject_abbr)
-    return f"{class_prefix} {subject_full}"
+
+    lookup = {key.lower(): value for key, value in subject_map.items()}
+
+    base, variant = _split_subject_variants(subject_abbr)
+    subject_full = _lookup_subject(base, lookup)
+    if subject_full is not None:
+        return " ".join(p for p in (class_prefix, subject_full, variant) if p)
+
+    # Some offers carry no grade and lead with the subject instead, trailing a
+    # teacher and half-year: 'Holz Wolke HJ1', 'Spo1 Badminton'. Numeric class
+    # prefixes never resolve, so a real '<class> <subject>' cannot land here.
+    prefix_full = _lookup_subject(class_prefix, lookup)
+    if prefix_full is not None:
+        return f"{prefix_full} {subject_abbr}"
+
+    return display_name
 
 
 def slugify(s: str) -> str:
@@ -244,7 +357,7 @@ def build_student_records(parsed_students: list, config: GeneratorConfig) -> lis
     """Build ASM student rows from parsed student master data.
 
     LIB-05: person_id = externKey (school-assigned stable ID).
-    Eliminates the name-derived suffix-counter scheme from generate_asm.py.
+    Eliminates the name-derived suffix-counter scheme the original script used.
     """
     result = []
     for s in parsed_students:
@@ -259,7 +372,7 @@ def build_student_records(parsed_students: list, config: GeneratorConfig) -> lis
         first_name = fore_name.split()[0] if fore_name else ""
         grade = extract_grade_level(klasse)
 
-        email = _make_email(first_name, long_name, config.email_domain)
+        email = _make_email(first_name, long_name, _domain(config))
 
         result.append({
             "person_id": person_id,
@@ -283,7 +396,7 @@ def build_student_records_monolith(parsed_students: list, config: GeneratorConfi
     Uses additional monolith metadata where available:
       - sis_username from Anmeldekennung
       - middle_name from additional Vorname tokens
-      - email local-part from source email (canonicalized to the configured domain)
+      - email local-part from source email (canonicalized to rissen domain)
     """
     result: list = []
     for s in parsed_students:
@@ -296,11 +409,15 @@ def build_student_records_monolith(parsed_students: list, config: GeneratorConfi
             s.get("rufname", ""),
         )
         last_name = (s.get("nachname", "") or "").strip()
-        grade = extract_grade_level((s.get("class_name", "") or "").strip())
+        # Jahrgangsstufe is the authoritative grade when it is a plain number;
+        # non-numeric values ('1Hj') and blanks fall back to the class label,
+        # which still yields a grade for names like 'Fremd 12'.
+        jahrgang = (s.get("jahrgangsstufe", "") or "").strip()
+        class_name = (s.get("class_name", "") or "").strip()
+        grade = jahrgang if jahrgang.isdigit() else extract_grade_level(class_name)
         source_email = (s.get("email", "") or "").strip() or (s.get("anmeldekennung", "") or "").strip()
         email = _build_canonical_email_from_source_or_name(
-            source_email, first_name, last_name, config.email_domain
-        )
+            source_email, first_name, last_name, _domain(config))
 
         result.append(
             {
@@ -324,6 +441,7 @@ def build_teacher_records(
     existing_staff: list,
     config: GeneratorConfig,
     monolith_staff: list | None = None,
+    person_pins: dict | None = None,
 ) -> dict:
     """Build a dict of teacher records keyed by (first_name, last_name).
 
@@ -334,6 +452,13 @@ def build_teacher_records(
     including teachers without active course sections.
     """
     aliases = config.load_aliases()
+    domain = _domain(config)
+    # A school with no ASM staff accounts yet should key them on the SIS uuid, as
+    # students already are — then a rename can never re-key anyone and the whole
+    # pin mechanism is unnecessary. A school whose accounts already exist under
+    # name-derived ids cannot switch: the id IS the account.
+    use_uuid_ids = (getattr(config, "staff_id_source", "name") or "name") == "interne_id"
+    pins = person_pins or {}
     teachers: dict = OrderedDict()
     seen_pids: set = set()
     pid_to_key: dict[str, tuple[str, str]] = {}
@@ -342,26 +467,29 @@ def build_teacher_records(
         if (row.get("person_id", "") or "").startswith("SAMPLE-"):
             return
 
-        first_raw = row.get("first_name", row.get("foreName", ""))
-        last_raw = row.get("last_name", row.get("longName", ""))
-        first_source = _clean_teacher_first_name(first_raw)
-        last_source = (last_raw or "").strip()
-        first, last = aliases.get((first_source, last_source), (first_source, last_source))
-        first = _clean_teacher_first_name(first)
+        first_source = _clean_teacher_first_name(
+            row.get("first_name", row.get("foreName", ""))
+        )
+        last_source = (row.get("last_name", row.get("longName", "")) or "").strip()
+        first, last, person_number, derived_pid = resolve_staff_identity(row, aliases)
         alias_applied = (first, last) != (first_source, last_source)
 
-        person_number = (
-            row.get("person_number", row.get("name", row.get("pnr", ""))) or ""
-        ).strip()
         if not first and not last and not person_number:
             return
 
-        pid = _derive_staff_person_id(first, last, person_number)
+        # A pinned id is the account ASM already has; the name must not move it.
+        uid = (row.get("_uid", "") or "").strip()
+        if use_uuid_ids and uid:
+            # The SIS uuid never moves when a name changes, so no pin is needed
+            # or consulted — pinning exists only to hold a name-derived id still.
+            pid = uid
+        else:
+            pid = pins.get(uid) or derived_pid
         existing_email = (row.get("email_address", row.get("address.email", "")) or "").strip()
         if row.get("_source") == "monolith" and alias_applied:
             # Alias target is the canonical identity; derive canonical mailbox from it.
             existing_email = ""
-        validated_email = _validate_email(existing_email, config.email_domain)
+        validated_email = _validate_email(existing_email, domain)
 
         if pid in seen_pids:
             existing_key = pid_to_key.get(pid)
@@ -378,14 +506,20 @@ def build_teacher_records(
 
         canonical_pid = pid
         seen_pids.add(canonical_pid)
+        # The dict key keeps the full given name — that is what alias lookup
+        # and section matching use. Only the exported fields are split.
         key = (first, last)
-        email = _get_email_for_staff(
-            canonical_pid, existing_email, first, last, config.email_domain
-        )
+        given, middle = _split_given_names(first)
+        # With name-derived ids the id already reads firstname.lastname, so it is
+        # the local part. With uuid ids it must not be — nobody can use
+        # 65c1f2b8-…@school.de as an address.
+        email_local = _email_local_from_name(first, last) if use_uuid_ids else canonical_pid
+        email = _get_email_for_staff(email_local, existing_email, first, last, domain)
         teachers[key] = {
             "person_id": canonical_pid,
             "person_number": person_number,
-            "first_name": first,
+            "first_name": given,
+            "middle_name": middle,
             "last_name": last,
             "email_address": email,
             "sis_username": row.get("sis_username", ""),
@@ -426,11 +560,13 @@ def build_teacher_records(
                         rec["person_number"] = abbr
             else:
                 seen_pids.add(pid)
-                email = _get_email_for_staff(pid, "", first, last, config.email_domain)
+                given, middle = _split_given_names(first)
+                email = _get_email_for_staff(pid, "", first, last, domain)
                 teachers[key] = {
                     "person_id": pid,
                     "person_number": abbr or "",
-                    "first_name": first,
+                    "first_name": given,
+                    "middle_name": middle,
                     "last_name": last,
                     "email_address": email,
                     "sis_username": "",
@@ -548,3 +684,55 @@ def build_class_records(
                     })
 
     return classes, rosters, warnings
+
+
+def _collapse_by_id(rows: list, id_field: str, label_field: str) -> tuple[list, list]:
+    """Keep one row per id, preferring the undecorated label; report collapses."""
+    grouped: dict[str, list[dict]] = OrderedDict()
+    for row in rows:
+        grouped.setdefault(row[id_field], []).append(row)
+
+    def rank(row: dict) -> tuple:
+        # Fewest leading '#' wins, then a stable tie-break on the raw name.
+        label = row[label_field]
+        return (len(label) - len(label.lstrip("#")), label)
+
+    keep: list = []
+    warnings: list = []
+    for row_id, members in grouped.items():
+        winner, *rest = sorted(members, key=rank)
+        keep.append(winner)
+        if rest:
+            warnings.append(
+                f"WARNING: '{winner[label_field]}' and "
+                f"{', '.join(repr(r[label_field]) for r in rest)} are the same "
+                f"{id_field.replace('_id', '')} ({row_id}); kept one."
+            )
+    return keep, warnings
+
+
+def drop_duplicate_classes(
+    courses: list,
+    classes: list,
+    rosters: list,
+) -> tuple[list, list, list, list]:
+    """Collapse courses/classes that share an id, returning the trimmed tables.
+
+    ``slugify`` ignores the leading '#' Schuldock puts on some offer names, so
+    '#Holz Wolke HJ1' and 'Holz Wolke HJ1' produce the same course_id and
+    class_id — a duplicate primary key that ASM rejects. They are the same
+    course, so one row is kept; the undecorated name wins because it is the
+    stable one.
+
+    Rosters are keyed on (class_id, student_id) and are already unique, so no
+    enrolment is touched.
+
+    Returns ``(courses, classes, rosters, warnings)``.
+    """
+    courses, course_warnings = _collapse_by_id(courses, "course_id", "course_number")
+    classes, class_warnings = _collapse_by_id(classes, "class_id", "class_number")
+
+    live_classes = {c["class_id"] for c in classes}
+    rosters = [r for r in rosters if r["class_id"] in live_classes]
+
+    return courses, classes, rosters, course_warnings + class_warnings

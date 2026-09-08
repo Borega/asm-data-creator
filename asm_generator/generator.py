@@ -9,6 +9,8 @@ from .transform import (
     build_student_records,
     build_student_records_monolith,
     build_teacher_records,
+    drop_duplicate_classes,
+    resolve_staff_identity,
 )
 
 
@@ -19,6 +21,7 @@ def generate(
     existing_staff: list | None = None,
     input_mode: str | None = None,
     monolith_paths: list | None = None,
+    person_pins: dict | None = None,
 ) -> GeneratorResult:
     """Run the full ASM generation pipeline in memory.
 
@@ -58,6 +61,7 @@ def generate(
         existing_staff,
         config,
         monolith_staff=monolith_teacher_rows,
+        person_pins=person_pins,
     )
     courses_map = build_course_records(sections, config)
     classes, rosters, build_warnings = build_class_records(
@@ -65,10 +69,29 @@ def generate(
     )
     warnings.extend(build_warnings)
 
+    courses, classes, rosters, dedupe_warnings = drop_duplicate_classes(
+        list(courses_map.values()), classes, rosters
+    )
+    warnings.extend(dedupe_warnings)
+
+    # Re-resolve each monolith row to the record it became. build_teacher_records
+    # keys on (first, last), so this is the only place a Schuldock uuid and the
+    # exported person_id meet; resolve_staff_identity is the same function that
+    # built that key, so the two cannot drift apart.
+    aliases = config.load_aliases()
+    staff_uids: dict[str, str] = {}
+    for row in monolith_teacher_rows:
+        uid = (row.get("_uid", "") or "").strip()
+        first, last, _, _ = resolve_staff_identity(row, aliases)
+        record = teacher_records.get((first, last))
+        if uid and record:
+            staff_uids[uid] = record["person_id"]
+
     return GeneratorResult(
         students=student_records,
         staff=list(teacher_records.values()),
-        courses=list(courses_map.values()),
+        staff_uids=staff_uids,
+        courses=courses,
         classes=classes,
         rosters=rosters,
         warnings=warnings,

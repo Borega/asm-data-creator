@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    CaptionLabel,
     HorizontalSeparator,
     InfoBar,
     InfoBarPosition,
@@ -90,10 +91,37 @@ class SettingsPage(QWidget):
         self._email_domain_edit.setPlaceholderText("e.g. school.example")
         form.addRow(BodyLabel("Email Domain"), self._email_domain_edit)
 
-        # Target school year (used for monolith mode filtering)
+        # Deliberately read-only. Changing it re-keys every staff account at once:
+        # ASM deactivates all of them and creates new ones, and accounts in use
+        # cannot be recovered. It is set correctly when the app is first run, and
+        # the only reason to change it afterwards is a mistake — so the edit is
+        # left to settings.json, where it takes intent rather than a stray click.
+        self._staff_id_source_edit = LineEdit()
+        self._staff_id_source_edit.setFixedHeight(self._FIELD_HEIGHT)
+        self._staff_id_source_edit.setReadOnly(True)
+        self._staff_id_source_edit.setToolTip(
+            "How each staff person_id is built.\n\n"
+            "SIS internal ID — the id never moves when a name changes. Correct "
+            "for a school with no ASM staff accounts yet.\n"
+            "Name (firstname.lastname) — for schools whose staff accounts already "
+            "exist under these ids and so cannot be re-keyed.\n\n"
+            "Read-only: changing this deactivates every existing staff account "
+            "and creates new ones. Edit settings.json if you genuinely must."
+        )
+        form.addRow(BodyLabel("Staff ID source"), self._staff_id_source_edit)
+
+        # Target school year (filters Schuldock offers; blank = auto-detect)
         self._target_year_edit = LineEdit()
         self._target_year_edit.setFixedHeight(self._FIELD_HEIGHT)
-        self._target_year_edit.setPlaceholderText("e.g. 2025/2026")
+        self._target_year_edit.setPlaceholderText(
+            "Leave empty to detect automatically — or pin one, e.g. 2026/2027"
+        )
+        self._target_year_edit.setToolTip(
+            "Schuldock exports carry several school years at once.\n"
+            "Empty: the year most offers belong to wins — correct after a rollover.\n"
+            "Set: only offers from exactly this year are imported. A stale value "
+            "silently imports last year's classes."
+        )
         form.addRow(BodyLabel("Target School Year"), self._target_year_edit)
 
         # Teacher aliases path
@@ -174,6 +202,21 @@ class SettingsPage(QWidget):
         self._analyze_activity_btn.setFixedHeight(self._FIELD_HEIGHT)
         self._analyze_activity_btn.clicked.connect(self._on_analyze_activity_log_clicked)
         root.addWidget(self._analyze_activity_btn)
+
+        # Separate from the baseline buttons on purpose: the baseline decides
+        # what a row is compared against, this decides whether ASM actually
+        # holds the account a decision would destroy.
+        self._asm_state_log_btn = PushButton("Load Activity Log as ASM Evidence")
+        self._asm_state_log_btn.setFixedHeight(self._FIELD_HEIGHT)
+        self._asm_state_log_btn.setToolTip(
+            "Fills the 'In ASM' column in Diff Review so holding a row back "
+            "cannot silently deactivate a live account."
+        )
+        self._asm_state_log_btn.clicked.connect(self._on_asm_state_log_clicked)
+        root.addWidget(self._asm_state_log_btn)
+
+        self._asm_state_log_label = CaptionLabel("")
+        root.addWidget(self._asm_state_log_label)
 
         self._set_activity_log_baseline_btn = PushButton("Use Activity Log as Diff Baseline")
         self._set_activity_log_baseline_btn.setFixedHeight(self._FIELD_HEIGHT)
@@ -379,6 +422,35 @@ class SettingsPage(QWidget):
         title = "Activity Log Summary" if ok else "Activity Log Analysis Failed"
         self._show_activity_report_dialog(title, report)
 
+    def _on_asm_state_log_clicked(self) -> None:
+        if self._controller is None:
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select ASM Activity Log to use as evidence of current ASM state",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+
+        ok, message = self._controller.set_asm_state_log(path)
+        self._refresh_asm_state_log_label()
+        if ok:
+            self._show_info("ASM evidence loaded", message)
+        else:
+            self._show_error(message)
+
+    def _refresh_asm_state_log_label(self) -> None:
+        if self._controller is None:
+            return
+        path = (self._controller.get_asm_state_log_path() or "").strip()
+        self._asm_state_log_label.setText(
+            f"ASM evidence: {Path(path).name}" if path
+            else "ASM evidence: none — 'In ASM' will read '?'"
+        )
+
     def _on_set_activity_log_baseline_clicked(self) -> None:
         if self._controller is None:
             return
@@ -394,6 +466,7 @@ class SettingsPage(QWidget):
 
         ok, message = self._controller.set_diff_baseline_from_activity_log(path)
         self._refresh_diff_baseline_label()
+        self._refresh_asm_state_log_label()
         if ok:
             self._show_info("Diff baseline updated", message)
         else:
@@ -414,6 +487,7 @@ class SettingsPage(QWidget):
 
         ok, message = self._controller.set_diff_baseline_from_csv(path)
         self._refresh_diff_baseline_label()
+        self._refresh_asm_state_log_label()
         if ok:
             self._show_info("Diff baseline updated", message)
         else:
@@ -425,6 +499,7 @@ class SettingsPage(QWidget):
 
         ok, message = self._controller.set_diff_baseline_from_last_export()
         self._refresh_diff_baseline_label()
+        self._refresh_asm_state_log_label()
         if ok:
             self._show_info("Diff baseline updated", message)
         else:
@@ -436,6 +511,7 @@ class SettingsPage(QWidget):
 
         _ok, message = self._controller.clear_diff_baseline()
         self._refresh_diff_baseline_label()
+        self._refresh_asm_state_log_label()
         self._show_info("Diff baseline cleared", message)
 
     def _refresh_diff_baseline_label(self) -> None:
@@ -542,6 +618,11 @@ class SettingsPage(QWidget):
         """Populate form fields from a settings dict (e.g. loaded from SettingsStore)."""
         self._location_id_edit.setText(settings.get("location_id", ""))
         self._email_domain_edit.setText(settings.get("email_domain", ""))
+        self._staff_id_source_edit.setText(
+            "SIS internal ID (stable across renames)"
+            if settings.get("staff_id_source", "name") == "interne_id"
+            else "Name — firstname.lastname (existing accounts, cannot be re-keyed)"
+        )
         self._target_year_edit.setText(settings.get("target_school_year", ""))
         self._teacher_aliases_edit.setText(settings.get("teacher_aliases_path", ""))
         self._subject_map_edit.setText(settings.get("subject_map_path", ""))
@@ -555,3 +636,4 @@ class SettingsPage(QWidget):
             self.set_sftp_status(ok, msg)
 
         self._refresh_diff_baseline_label()
+        self._refresh_asm_state_log_label()

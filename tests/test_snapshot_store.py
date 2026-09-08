@@ -1,11 +1,10 @@
 import json
-import os
-import pytest
-from pathlib import Path
 from unittest.mock import patch
 
-from asm_generator.config import GeneratorResult
+import pytest
+
 import snapshot_store
+from asm_generator.config import GeneratorResult
 
 
 def _make_result(**kwargs) -> GeneratorResult:

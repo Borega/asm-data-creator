@@ -666,7 +666,7 @@ def test_export_upload_attempts_backup_before_upload_and_saves_snapshot(controll
         "upload_file",
         lambda _path, username, password: (call_order.append("upload") or f"{username}:{password}"),
     )
-    monkeypatch.setattr(ac_module, "save_snapshot", lambda _result: call_order.append("snapshot"))
+    monkeypatch.setattr(ac_module, "save_snapshot", lambda _result, **_kw: call_order.append("snapshot"))
 
     controller.export_zip_and_upload()
 
@@ -702,7 +702,7 @@ def test_export_upload_backup_failure_cancel_aborts_before_upload(controller, mo
     monkeypatch.setattr(
         ac_module,
         "save_snapshot",
-        lambda _result: called.__setitem__("snapshot", called["snapshot"] + 1),
+        lambda _result, **_kw: called.__setitem__("snapshot", called["snapshot"] + 1),
     )
 
     controller.export_zip_and_upload()
@@ -741,7 +741,7 @@ def test_export_upload_backup_failure_proceed_continues_to_upload(controller, mo
     monkeypatch.setattr(
         ac_module,
         "save_snapshot",
-        lambda _result: called.__setitem__("snapshot", called["snapshot"] + 1),
+        lambda _result, **_kw: called.__setitem__("snapshot", called["snapshot"] + 1),
     )
 
     controller.export_zip_and_upload()
@@ -808,7 +808,7 @@ def test_export_upload_failure_after_successful_backup_keeps_snapshot_unsaved(
     monkeypatch.setattr(
         ac_module,
         "save_snapshot",
-        lambda _result: called.__setitem__("snapshot", called["snapshot"] + 1),
+        lambda _result, **_kw: called.__setitem__("snapshot", called["snapshot"] + 1),
     )
 
     controller.export_zip_and_upload()
@@ -856,7 +856,7 @@ def test_export_upload_interruption_retry_then_success_preserves_backup_once(
     monkeypatch.setattr(
         ac_module,
         "save_snapshot",
-        lambda _result: (events.append("snapshot"), attempts.__setitem__("snapshot", attempts["snapshot"] + 1)),
+        lambda _result, **_kw: (events.append("snapshot"), attempts.__setitem__("snapshot", attempts["snapshot"] + 1)),
     )
 
     controller.export_zip_and_upload()
@@ -903,7 +903,7 @@ def test_export_upload_interruption_cancel_aborts_without_snapshot_or_reset(
     monkeypatch.setattr(
         ac_module,
         "save_snapshot",
-        lambda _result: called.__setitem__("snapshot", called["snapshot"] + 1),
+        lambda _result, **_kw: called.__setitem__("snapshot", called["snapshot"] + 1),
     )
 
     controller.export_zip_and_upload()
@@ -948,7 +948,7 @@ def test_export_upload_auth_failure_uses_credentials_message_branch(
     monkeypatch.setattr(
         ac_module,
         "save_snapshot",
-        lambda _result: called.__setitem__("snapshot", called["snapshot"] + 1),
+        lambda _result, **_kw: called.__setitem__("snapshot", called["snapshot"] + 1),
     )
 
     controller.export_zip_and_upload()

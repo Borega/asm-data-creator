@@ -1,4 +1,13 @@
 """Shared pytest fixtures for asm_generator tests."""
+import pytest
+
+import settings_store
+
+
+@pytest.fixture(autouse=True)
+def _no_legacy_data_dir(tmp_path, monkeypatch):
+    """Keep a developer's real legacy data folder out of every test."""
+    monkeypatch.setattr(settings_store, "_LEGACY_DIR", tmp_path / "no-legacy-dir")
 
 
 STUDENT_HEADER = "externKey\tlongName\tforeName\tklasse.name\n"

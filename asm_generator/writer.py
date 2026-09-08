@@ -195,7 +195,9 @@ def write_to_zip(result: GeneratorResult, output_path) -> None:
 def write_csv_files(result: GeneratorResult, output_dir=".") -> None:
     """Write all six ASM CSVs to output_dir.
 
-    Used by the generate_asm.py shim for standalone runs.
+    ponytail: no callers left since the CLI shim was deleted. Kept as the
+    unpacked counterpart to write_to_zip for standalone/scripted runs; delete
+    it if nothing has used it by the next cleanup.
     All files use UTF-8 encoding without BOM (ASM requirement) and QUOTE_ALL.
     """
     output_dir = Path(output_dir)

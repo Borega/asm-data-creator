@@ -73,12 +73,18 @@ def test_student_email_derived_from_name(config):
     assert records[0]["email_address"] == "anna.schmidt@example.org"
 
 
-def test_student_email_blank_when_domain_missing(config):
-    """No configured email domain → email_address is left blank (config-driven)."""
+def test_generation_refuses_when_the_email_domain_is_missing(config):
+    """Was: a blank domain silently produced rissen.hamburg.de addresses.
+
+    That only looked harmless while the domain was hardcoded. For any other
+    school it means issuing accounts on a domain they do not own, discovered
+    after the accounts exist — so a blank domain is now a hard error.
+    """
     config.email_domain = ""
     students = [{"externKey": "9000", "longName": "Schmidt", "foreName": "Anna", "klasse.name": "6b"}]
-    records = build_student_records(students, config)
-    assert records[0]["email_address"] == ""
+
+    with pytest.raises(ValueError, match="No email domain configured"):
+        build_student_records(students, config)
 
 
 def test_student_grade_extracted(config):
@@ -285,6 +291,148 @@ def test_expand_angebotsname():
     assert expand_angebotsname("5a Sp", subjects) == "5a Sport"
     assert expand_angebotsname("7b E", subjects) == "7b Englisch"
     assert expand_angebotsname("Unbekannt", subjects) == "Unbekannt"
+
+
+def test_expand_angebotsname_keeps_parallel_group_and_level_markers():
+    """'11 Phy 1' and '11 Phy 2' must stay tellable apart after expansion."""
+    subjects = {"Phy": "Physik", "D": "Deutsch"}
+    assert expand_angebotsname("11 Phy 1", subjects) == "11 Physik 1"
+    assert expand_angebotsname("11 Phy 2", subjects) == "11 Physik 2"
+    assert expand_angebotsname("12 D 2 eA", subjects) == "12 Deutsch 2 eA"
+    assert expand_angebotsname("12 D 2 gA", subjects) == "12 Deutsch 2 gA"
+
+
+def test_expand_angebotsname_resolves_studienstufe_suffix():
+    """'Bio_SS' is Biologie in the Studienstufe (years 12-13)."""
+    subjects = {"Bio": "Biologie", "E": "Englisch"}
+    assert expand_angebotsname("12-13 Bio_SS", subjects) == "12-13 Biologie Studienstufe"
+    assert expand_angebotsname("13c E_SS 3", subjects) == "13c Englisch Studienstufe 3"
+
+
+def test_expand_angebotsname_expands_longest_known_subject_prefix():
+    """'L:AB Holz Roth' is Arbeitslehre plus a workshop and a teacher."""
+    subjects = {"L:AB": "Arbeitslehre", "LB Gew": "Lernbereich Gesellschaft"}
+    assert expand_angebotsname("6 L:AB Holz Roth", subjects) == "6 Arbeitslehre Holz Roth"
+    # The two-token key must win over any shorter accidental match.
+    assert expand_angebotsname("8a LB Gew", subjects) == "8a Lernbereich Gesellschaft"
+
+
+def test_expand_angebotsname_expands_subject_led_offers():
+    """Offers with no grade lead with the subject: 'Holz Roth HJ1', 'Spo1 Badminton'."""
+    subjects = {"Holz": "Arbeitslehre Holz", "Spo1": "Sport", "Ma": "Mathematik"}
+    assert expand_angebotsname("Holz Roth HJ1", subjects) == "Arbeitslehre Holz Roth HJ1"
+    assert expand_angebotsname("Spo1 Badminton", subjects) == "Sport Badminton"
+    # A real '<class> <subject>' must not be re-read as subject-led.
+    assert expand_angebotsname("7a Ma", subjects) == "7a Mathematik"
+
+
+def test_build_teacher_records_splits_full_given_names(tmp_path):
+    """Schuldock now exports every given name; only the first belongs in first_name."""
+    aliases = tmp_path / "aliases.json"
+    aliases.write_text("[]", encoding="utf-8")
+    subjects = tmp_path / "subjects.json"
+    subjects.write_text("{}", encoding="utf-8")
+    config = GeneratorConfig(
+        location_id="loc", email_domain="rissen.hamburg.de",
+        aliases_path=str(aliases), subjects_path=str(subjects),
+    )
+
+    teachers = build_teacher_records(
+        [],
+        [],
+        config,
+        monolith_staff=[{
+            "first_name": "Jana Hannerl Astrid",
+            "last_name": "Ahrens",
+            "person_number": "And",
+            "_source": "monolith",
+        }],
+    )
+
+    rec = next(iter(teachers.values()))
+    assert rec["first_name"] == "Jana"
+    assert rec["middle_name"] == "Hannerl Astrid"
+    # person_id has always used the leading token, so it must not move.
+    assert rec["person_id"] == "jana.ahrens"
+
+
+def test_drop_duplicate_classes_collapses_hash_prefixed_twins():
+    """'#Holz Roth HJ1' and 'Holz Roth HJ1' slugify to one id — ASM rejects dupes."""
+    from asm_generator.transform import drop_duplicate_classes
+
+    courses = [
+        {"course_id": "holz-roth-hj1", "course_number": "#Holz Roth HJ1"},
+        {"course_id": "holz-roth-hj1", "course_number": "Holz Roth HJ1"},
+        {"course_id": "5a-ma", "course_number": "5a Ma"},
+    ]
+    classes = [
+        {"class_id": "cls-holz-roth-hj1", "class_number": "#Holz Roth HJ1"},
+        {"class_id": "cls-holz-roth-hj1", "class_number": "Holz Roth HJ1"},
+        {"class_id": "cls-5a-ma", "class_number": "5a Ma"},
+    ]
+    rosters = [
+        {"roster_id": "r1", "class_id": "cls-holz-roth-hj1", "student_id": "s1"},
+        {"roster_id": "r2", "class_id": "cls-5a-ma", "student_id": "s1"},
+    ]
+
+    courses, classes, out_rosters, warnings = drop_duplicate_classes(courses, classes, rosters)
+
+    assert [c["course_number"] for c in courses] == ["Holz Roth HJ1", "5a Ma"]
+    assert [c["class_number"] for c in classes] == ["Holz Roth HJ1", "5a Ma"]
+    assert out_rosters == rosters, "collapsing duplicate ids must not drop enrolments"
+    assert len(warnings) == 2  # one for the course, one for the class
+
+
+def test_drop_duplicate_classes_leaves_distinct_ids_alone():
+    """A form group shares students across subjects — those must never merge."""
+    from asm_generator.transform import drop_duplicate_classes
+
+    courses = [
+        {"course_id": "5a-ma", "course_number": "5a Ma"},
+        {"course_id": "5a-d", "course_number": "5a D"},
+    ]
+    classes = [
+        {"class_id": "cls-5a-ma", "class_number": "5a Ma"},
+        {"class_id": "cls-5a-d", "class_number": "5a D"},
+    ]
+    rosters = [
+        {"roster_id": "r1", "class_id": "cls-5a-ma", "student_id": "s1"},
+        {"roster_id": "r2", "class_id": "cls-5a-d", "student_id": "s1"},
+    ]
+
+    out = drop_duplicate_classes(courses, classes, rosters)
+
+    assert out[0] == courses and out[1] == classes and out[2] == rosters
+    assert out[3] == []
+
+
+def test_expand_angebotsname_drops_leading_hash_decoration():
+    """'#'/'##'/'###' is Schuldock decoration; '#10 Phil I' is grade 10."""
+    subjects = {"Phil": "Philosophie", "Holz": "Arbeitslehre Holz"}
+    assert expand_angebotsname("#10 Phil I", subjects) == "10 Philosophie I"
+    assert expand_angebotsname("###FORDER 9 NAWI", subjects) == "FORDER 9 NAWI"
+    assert expand_angebotsname("#Holz Roth HJ1", subjects) == "Arbeitslehre Holz Roth HJ1"
+
+
+def test_expand_angebotsname_matches_subjects_case_insensitively():
+    """The source spells one token both ways: '7 WP1 Fra' but '7 Wp1 Spa'."""
+    subjects = {"WP1 Spa": "Spanisch", "WP1 Fra": "Französisch"}
+    assert expand_angebotsname("7 Wp1 Spa", subjects) == "7 Spanisch"
+    assert expand_angebotsname("7 WP1 Fra", subjects) == "7 Französisch"
+
+
+def test_expand_angebotsname_keeps_unknown_underscore_suffix_verbatim():
+    """'Mu_VS' stays honest as 'Musik VS' rather than inventing a stage name."""
+    subjects = {"Mu": "Musik"}
+    assert expand_angebotsname("12-13 Mu_VS", subjects) == "12-13 Musik VS"
+    assert expand_angebotsname("10 Mu_5-10", subjects) == "10 Musik 5-10"
+
+
+def test_expand_angebotsname_leaves_unknown_subjects_untouched():
+    """An unrecognised subject must never be half-decoded or guessed at."""
+    subjects = {"Bio": "Biologie"}
+    for name in ("9a L:AB", "7 WP1 Fra", "11 Che 1 LEH", "12-13 Mu_VS"):
+        assert expand_angebotsname(name, subjects) == name
 
 
 # ---------------------------------------------------------------------------

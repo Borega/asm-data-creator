@@ -13,7 +13,6 @@ from asm_generator.config import GeneratorConfig
 from diff_baseline import load_baseline_from_csv_source
 from tests.conftest import make_monolith_csv
 
-
 _REQUIRED_FILES = ("students.csv", "staff.csv", "courses.csv", "classes.csv", "rosters.csv")
 
 

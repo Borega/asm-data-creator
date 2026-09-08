@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime
@@ -18,13 +19,16 @@ from qfluentwidgets import MessageBox
 
 from activity_log import (
     extract_baseline_from_activity_log,
+    load_person_state,
     render_activity_log_summary,
     summarize_activity_log,
 )
 from asm_generator import GeneratorConfig, GeneratorResult
+from asm_state import AsmState
 from backup_store import create_backup
 from diff_baseline import load_baseline_from_csv_source
 from diff_engine import compute_diff
+import person_pins
 from gui.workers import GeneratorWorker, SftpStatusWorker
 from settings_store import SettingsStore
 from sftp_client import check_connection as check_sftp_connection
@@ -37,9 +41,167 @@ from sftp_credentials import (
     is_keyring_available,
     set_password,
 )
-from snapshot_store import load_snapshot, save_snapshot
+from snapshot_store import load_provenance, load_snapshot, save_snapshot
 
 logger = logging.getLogger(__name__)
+
+
+_MAX_NOTE_LINES = 4        # per category — a wall of text hides the headline
+_MAX_NAMES_PER_LINE = 5
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+
+def _looks_like_uuid(value: str) -> bool:
+    """Distinguishes a SIS-id person_id from a name-derived one."""
+    return bool(_UUID_RE.match((value or "").strip()))
+
+
+def _staff_key_scheme(rows: list) -> str:
+    """Which scheme these staff ids follow: 'uuid', 'name', or 'unknown'.
+
+    Judged by majority, not by a sample: even in interne_id mode a roster is
+    legitimately mixed, because a teacher who appears only in a course export
+    has no SIS id and falls back to a name-derived one. Reading one row would
+    make the answer depend on list order.
+    """
+    ids = [(row.get("person_id") or "").strip() for row in rows]
+    ids = [pid for pid in ids if pid]
+    if not ids:
+        return "unknown"
+    uuids = sum(1 for pid in ids if _looks_like_uuid(pid))
+    names = len(ids) - uuids
+    if uuids > names:
+        return "uuid"
+    if names > uuids:
+        return "name"
+    return "unknown"
+
+
+def _person_label(record: dict | None, person_id: str) -> str:
+    """'Anna Meier (anna.meier)', or just the id when the record is unknown."""
+    if not record:
+        return person_id
+    name = " ".join(
+        p for p in (record.get("first_name", ""), record.get("last_name", "")) if p
+    ).strip()
+    return f"{name} ({person_id})" if name else person_id
+
+
+def _summarise(items: list[str]) -> str:
+    head = ", ".join(items[:_MAX_NAMES_PER_LINE])
+    extra = len(items) - _MAX_NAMES_PER_LINE
+    return f"{head} and {extra:,} more" if extra > 0 else head
+
+
+def _cap(lines: list[str]) -> list[str]:
+    """Capped per category, so a long list in one never hides another."""
+    extra = len(lines) - _MAX_NOTE_LINES
+    return lines if extra <= 0 else lines[:_MAX_NOTE_LINES] + [f"…and {extra:,} more"]
+
+
+def _prune_dangling_references(
+    result: GeneratorResult,
+    catalogue: GeneratorResult | None = None,
+) -> list[str]:
+    """Drop rows pointing at a person or class this export is holding back.
+
+    Unticking an ADDED row keeps that record out of the file, but the rows that
+    referenced it stay behind: a class still names the teacher as instructor, a
+    roster still names the student. ASM rejects a file whose foreign keys point
+    at nothing, so an unticked row would fail the whole upload rather than the
+    one record.
+
+    *catalogue* is the unfiltered result, used only to turn the ids of dropped
+    records back into names — the whole point of the report is to say who, and
+    by this stage the held-back rows are gone from *result* itself.
+
+    Mutates *result* in place and returns human-readable notes, capped so a
+    large prune stays readable.
+    """
+    # Falls back to result when no usable catalogue is supplied: the report then
+    # names ids instead of people, which is worse but never fatal.
+    ref = catalogue if isinstance(catalogue, GeneratorResult) else result
+    staff_by_id = {s.get("person_id"): s for s in ref.staff}
+    students_by_id = {s.get("person_id"): s for s in ref.students}
+    class_label = {
+        c.get("class_id"): (c.get("class_number") or c.get("class_id"))
+        for c in ref.classes
+    }
+    course_label = {
+        c.get("course_id"): (c.get("course_name") or c.get("course_number") or c.get("course_id"))
+        for c in ref.courses
+    }
+
+    course_notes: list[str] = []
+    student_notes: list[str] = []
+    teacher_notes: list[str] = []
+
+    live_courses = {c.get("course_id") for c in result.courses}
+    dropped_classes = [c for c in result.classes if c.get("course_id") not in live_courses]
+    if dropped_classes:
+        result.classes = [c for c in result.classes if c.get("course_id") in live_courses]
+        by_course: dict[str, list[str]] = {}
+        for cls in dropped_classes:
+            by_course.setdefault(cls.get("course_id"), []).append(
+                class_label.get(cls.get("class_id"), cls.get("class_id", "?"))
+            )
+        for course_id, names in by_course.items():
+            course_notes.append(
+                f"Course not being created: {course_label.get(course_id, course_id)} "
+                f"— dropped {len(names):,} class(es): {_summarise(names)}"
+            )
+
+    live_classes = {c.get("class_id") for c in result.classes}
+    live_students = {s.get("person_id") for s in result.students}
+    kept, lost = [], []
+    for roster in result.rosters:
+        if roster.get("class_id") in live_classes and roster.get("student_id") in live_students:
+            kept.append(roster)
+        else:
+            lost.append(roster)
+    if lost:
+        result.rosters = kept
+        by_student: dict[str, int] = {}
+        for roster in lost:
+            sid = roster.get("student_id")
+            if sid not in live_students:
+                by_student[sid] = by_student.get(sid, 0) + 1
+        for sid, count in by_student.items():
+            student_notes.append(
+                f"Student not being created: {_person_label(students_by_id.get(sid), sid)} "
+                f"— removed {count:,} enrolment(s)"
+            )
+        orphaned = len(lost) - sum(by_student.values())
+        if orphaned:
+            course_notes.append(
+                f"{orphaned:,} further enrolment(s) removed for dropped classes")
+
+    # An instructor is optional on a class, so blank the reference rather than
+    # dropping the class and everyone enrolled in it.
+    live_staff = {s.get("person_id") for s in result.staff}
+    by_teacher: dict[str, list[str]] = {}
+    for cls in result.classes:
+        for field_name in ("instructor_id", "instructor_id_2", "instructor_id_3"):
+            pid = cls.get(field_name)
+            if pid and pid not in live_staff:
+                cls[field_name] = ""
+                by_teacher.setdefault(pid, []).append(
+                    class_label.get(cls.get("class_id"), cls.get("class_id", "?"))
+                )
+    for pid, class_names in by_teacher.items():
+        teacher_notes.append(
+            f"Teacher not being created: {_person_label(staff_by_id.get(pid), pid)} "
+            f"— removed as instructor from {len(class_names):,} class(es): "
+            f"{_summarise(class_names)}"
+        )
+
+    # Most destructive first: a dropped course takes whole classes with it, a
+    # missing teacher only empties a field, a missing student only their own rows.
+    return _cap(course_notes) + _cap(teacher_notes) + _cap(student_notes)
 
 
 class AppController:
@@ -127,6 +289,8 @@ class AppController:
         self._diff_page = diff_page
         self._settings_page = settings_page
 
+        input_page.refresh_setup_hint()
+
         # Wire signals (connected on main thread — safe for cross-thread signals)
         input_page.run_requested.connect(self._on_run_requested)
         diff_page.export_requested.connect(self.export_zip)
@@ -158,9 +322,30 @@ class AppController:
         """
         self._settings = SettingsStore.load()
         self._refresh_upload_ui_state()
+        if self._input_page is not None:
+            self._input_page.refresh_setup_hint()
+
+    # Settings that generation cannot proceed without, and the labels the
+    # Settings page shows for them, so a message can name the field to fill.
+    REQUIRED_SETTINGS = (
+        ("location_id", "Location ID"),
+        ("email_domain", "Email Domain"),
+    )
+
+    def missing_required_settings(self) -> list[str]:
+        """Labels of required settings still blank. Empty means ready to run.
+
+        Without this a fresh install gets as far as choosing input files before
+        failing, and the reason arrives as a generator exception rather than as
+        the name of the field to fill in.
+        """
+        return [
+            label for key, label in self.REQUIRED_SETTINGS
+            if not (self._settings.get(key, "") or "").strip()
+        ]
 
     def should_open_settings_on_startup(self) -> bool:
-        return not self._has_sftp_credentials()
+        return bool(self.missing_required_settings()) or not self._has_sftp_credentials()
 
     def save_sftp_credentials(self, old_username: str, new_username: str, password: str) -> tuple[bool, str]:
         # The user is changing credentials — retire any probe still in flight.
@@ -492,24 +677,35 @@ class AppController:
     def build_config(self) -> GeneratorConfig:
         """Build GeneratorConfig from current settings, resolving empty paths to bundled defaults."""
 
-        def _resolve(path_str: str, filename: str) -> str:
+        def _resolve(path_str: str, filename: str, fallback: str = "") -> str:
             if path_str:
                 return path_str
             # Frozen (PyInstaller): sys._MEIPASS; dev: project root
-            base = getattr(sys, "_MEIPASS", Path(__file__).parent.parent)
-            return str(Path(base) / filename)
+            base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent.parent))
+            primary = base / filename
+            # teacher_aliases.json names real staff, so it is gitignored and
+            # absent from a clean clone or a fresh install. Fall back to the
+            # tracked empty stub rather than failing to generate at all.
+            if fallback and not primary.is_file():
+                return str(base / fallback)
+            return str(primary)
 
         return GeneratorConfig(
             location_id=self._settings.get("location_id", ""),
             email_domain=self._settings.get("email_domain", ""),
             aliases_path=_resolve(
-                self._settings.get("teacher_aliases_path", ""), "teacher_aliases.json"
+                self._settings.get("teacher_aliases_path", ""),
+                "teacher_aliases.json",
+                fallback="teacher_aliases.empty.json",
             ),
             subjects_path=_resolve(
                 self._settings.get("subject_map_path", ""), "subject_map.json"
             ),
             input_mode=self._settings.get("input_mode", "schuldock"),
             target_school_year=self._settings.get("target_school_year", ""),
+            # "name" if absent — SettingsStore only hands out "interne_id" to a
+            # genuinely fresh install, never to one with accounts already keyed.
+            staff_id_source=self._settings.get("staff_id_source", "name"),
         )
 
     # ------------------------------------------------------------------
@@ -542,6 +738,9 @@ class AppController:
             export_paths,
             input_mode=mode,
             monolith_paths=monolith_paths,
+            # Keeps staff on the ASM account they already have when Schuldock
+            # renames them; empty map = ids derived exactly as before.
+            person_pins=person_pins.load(),
         )
         # Signals connected on main thread — safe for cross-thread delivery
         worker.signals.finished.connect(self._on_worker_finished)
@@ -562,9 +761,11 @@ class AppController:
             ).exec()
             snapshot = None
 
+        self._warn_if_staff_ids_were_rekeyed(result, snapshot)
+
         diff_snapshot = self._build_snapshot_for_diff(snapshot)
         diff_result = compute_diff(result, diff_snapshot)
-        self._diff_page.load_diff(diff_result)
+        self._diff_page.load_diff(diff_result, self._build_asm_state(snapshot))
         self._diff_page.set_upload_available(self._sftp_ready, self._sftp_status_message)
 
         # Navigate to DiffReviewPage — MainWindow.switchTo() handles nav sync
@@ -598,7 +799,8 @@ class AppController:
             return
 
         # Save snapshot only after successful ZIP write
-        save_snapshot(result)
+        save_snapshot(result, via="export")
+        self._remember_pins(result)
 
         # Notify user, then reset diff page to placeholder
         box = MessageBox(
@@ -692,7 +894,8 @@ class AppController:
                         return
                     attempt += 1
 
-        save_snapshot(result)
+        save_snapshot(result, via="upload")
+        self._remember_pins(result)
 
         box = MessageBox(
             "Upload Successful",
@@ -708,14 +911,121 @@ class AppController:
 
     def _build_result_from_approved(self) -> GeneratorResult:
         approved = self._diff_page.get_approved_records()
-        return GeneratorResult(
+        result = GeneratorResult(
             students=approved["students"],
             staff=approved["staff"],
             courses=approved["courses"],
             classes=approved["classes"],
             rosters=approved["rosters"],
             warnings=self._last_result.warnings if self._last_result else [],
+            # Not narrowed to the approved rows — _remember_pins does that by
+            # intersecting with the person_ids actually in this result.
+            staff_uids=getattr(self._last_result, "staff_uids", {}) or {},
         )
+
+        # self._last_result still holds the held-back rows, so it is what turns
+        # their ids back into names for the report.
+        notes = _prune_dangling_references(result, self._last_result)
+        if notes:
+            MessageBox(
+                "Held-back records affect other rows",
+                "Rows you left unticked are referenced elsewhere. ASM rejects a "
+                "file that points at a person or class it was never given, so "
+                "these were dropped too:\n\n• " + "\n\n• ".join(notes),
+                self._window,
+            ).exec()
+        return result
+
+    def _warn_if_staff_ids_were_rekeyed(
+        self, result: GeneratorResult, snapshot: GeneratorResult | None
+    ) -> None:
+        """Catch the whole staff being re-keyed at once, before it is reviewed.
+
+        Switching staff_id_source on a school that already has ASM staff accounts
+        deactivates every one of them and creates them again under new ids. It
+        arrives in the review looking like an ordinary pile of ADDED and DELETED
+        rows, which is exactly how it would get waved through.
+        """
+        if snapshot is None or not snapshot.staff:
+            return
+        was = _staff_key_scheme(snapshot.staff)
+        now = _staff_key_scheme(result.staff)
+        if was == "unknown" or now == "unknown" or was == now:
+            return
+
+        stranded = {(r.get("person_id") or "") for r in snapshot.staff}
+        stranded -= {(r.get("person_id") or "") for r in result.staff}
+
+        direction = "names to SIS ids" if now == "uuid" else "SIS ids to names"
+        MessageBox(
+            "Every staff person_id has changed",
+            f"The staff id scheme moved from {direction}, so "
+            f"{len(stranded):,} existing staff accounts would be deactivated "
+            "and created again under new ids.\n\n"
+            "ASM keys accounts on person_id, so this cannot be undone once "
+            "uploaded — mail, data and sign-ins stay with the deactivated "
+            "accounts.\n\n"
+            "If this was not deliberate, close without exporting and set "
+            "'Staff ID source' in Settings back to its previous value.",
+            self._window,
+        ).exec()
+
+    def get_asm_state_log_path(self) -> str:
+        return (self._settings.get("asm_state_log_path", "") or "").strip()
+
+    def set_asm_state_log(self, path: str) -> tuple[bool, str]:
+        """Adopt an ASM activity log as evidence of what ASM currently holds."""
+        path = (path or "").strip()
+        if not path:
+            return False, "No activity log selected."
+        try:
+            state = load_person_state(path)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Could not read the activity log: {exc}"
+        if not state:
+            return False, "That log records no successful person operations."
+
+        self._settings["asm_state_log_path"] = path
+        SettingsStore.save(self._settings)
+        live = sum(1 for active in state.values() if active)
+        return True, (
+            f"{len(state):,} people found — {live:,} active, {len(state) - live:,} "
+            "deactivated.\n\nA log only names the people that changed in that sync, "
+            "so anyone it does not mention still shows as '?'."
+        )
+
+    def _build_asm_state(self, snapshot: GeneratorResult | None) -> AsmState:
+        """Assemble the best available evidence about what ASM holds.
+
+        Never raises: a missing or unreadable log downgrades the answer to
+        UNKNOWN, which the review already treats as 'do not assume safe'.
+        """
+        log_state: dict[str, bool] = {}
+        path = (self._settings.get("asm_state_log_path", "") or "").strip()
+        if path:
+            try:
+                log_state = load_person_state(path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not read ASM state log %s: %s", path, exc, exc_info=exc)
+
+        # Only an uploaded snapshot is evidence: an exported ZIP may never have
+        # been sent, and a snapshot from before an id-rule change describes a
+        # file rather than ASM.
+        confirmed = load_provenance().get("via") == "upload"
+        ids = None
+        if snapshot is not None:
+            ids = {r.get("person_id") for r in (*snapshot.students, *snapshot.staff)}
+        return AsmState(log_state, ids, snapshot_confirmed=confirmed)
+
+    def _remember_pins(self, result: GeneratorResult) -> None:
+        """Pin the staff ids this export just handed ASM. Never fails an export."""
+        try:
+            exported = {r.get("person_id", "") for r in result.staff}
+            added = person_pins.remember(result.staff_uids, exported)
+            if added:
+                logger.info("pinned %d newly exported staff id(s)", len(added))
+        except Exception as exc:  # noqa: BLE001 — the ZIP is already written
+            logger.warning("Could not update person pins: %s", exc, exc_info=exc)
 
     def _write_zip_or_show_error(self, result: GeneratorResult, path: str, write_to_zip) -> bool:
         try:

@@ -25,6 +25,18 @@ a = Analysis(
     binaries=binaries,
     datas=datas + [
         ("gui/assets/icon.ico", "gui/assets"),  # bundle the window icon
+        # Defaults resolved against sys._MEIPASS when Settings leaves a path
+        # blank (gui/app_controller.py::_resolve). Without these a fresh
+        # install cannot generate at all.
+        #
+        # Only files tracked in git may appear here: a clean clone is what CI
+        # and every other school builds from, and PyInstaller fails on a datas
+        # entry it cannot find. teacher_aliases.json is deliberately gitignored
+        # (it names real staff), so the tracked empty stub ships instead and
+        # _resolve falls back to it. locations.csv is per-school and optional —
+        # writer.py::_load_location_name_map already degrades to location ids.
+        ("teacher_aliases.empty.json", "."),
+        ("subject_map.json", "."),
     ],
     hiddenimports=hiddenimports + [
         "asm_generator",
@@ -37,6 +49,7 @@ a = Analysis(
         "backup_store",
         "diff_baseline",
         "diff_engine",
+        "person_pins",
         "settings_store",
         "sftp_client",
         "sftp_credentials",

@@ -11,30 +11,31 @@ Eine Windows-Desktop-Anwendung zur Erstellung von Apple School Manager (ASM) CSV
 ## Inhaltsverzeichnis
 
 1. [Was ist der ASM Generator?](#was-ist-der-asm-generator)
-2. [Schnellstart](#schnellstart)
-3. [Installation & Einrichtung](#installation--einrichtung)
-4. [Bedienungsanleitung](#bedienungsanleitung)
+2. [⚠️ Bevor Sie starten: Wie ASM Konten identifiziert](#️-bevor-sie-starten-wie-asm-konten-identifiziert)
+3. [Schnellstart](#schnellstart)
+4. [Installation & Einrichtung](#installation--einrichtung)
+5. [Bedienungsanleitung](#bedienungsanleitung)
    - [Die drei Hauptbereiche](#die-drei-hauptbereiche)
    - [Input-Seite – Daten einlesen](#input-seite--daten-einlesen)
    - [Diff Review-Seite – Änderungen prüfen](#diff-review-seite--änderungen-prüfen)
    - [Settings-Seite – Einstellungen](#settings-seite--einstellungen)
-5. [Eingabemodi im Detail](#eingabemodi-im-detail)
+6. [Eingabemodi im Detail](#eingabemodi-im-detail)
    - [Legacy-Modus](#legacy-modus)
    - [Schuldock-Modus](#schuldock-modus)
-6. [Konfigurationsdateien](#konfigurationsdateien)
+7. [Konfigurationsdateien](#konfigurationsdateien)
    - [teacher_aliases.json](#teacher_aliasesjson)
    - [subject_map.json](#subject_mapjson)
    - [locations.csv](#locationscsv)
-7. [Export & Upload](#export--upload)
+8. [Export & Upload](#export--upload)
    - [ZIP-Export](#zip-export)
    - [SFTP-Upload zu Apple](#sftp-upload-zu-apple)
    - [Lokale Backups](#lokale-backups)
-8. [Diff-Baselines](#diff-baselines)
-9. [Aktivitätslog-Analyse](#aktivitätslog-analyse)
-10. [Entwicklung & Build](#entwicklung--build)
-11. [Projektstruktur](#projektstruktur)
-12. [Tests](#tests)
-13. [Fehlerbehebung](#fehlerbehebung)
+9. [Diff-Baselines](#diff-baselines)
+10. [Aktivitätslog-Analyse](#aktivitätslog-analyse)
+11. [Entwicklung & Build](#entwicklung--build)
+12. [Projektstruktur](#projektstruktur)
+13. [Tests](#tests)
+14. [Fehlerbehebung](#fehlerbehebung)
 
 ---
 
@@ -56,6 +57,68 @@ Der **ASM Generator** wandelt Schulexport-Daten (Schülerstammdaten, Kursbelegun
 | 🔐 **Sichere Zugangsdaten** | SFTP-Passwort im Windows-Credential-Manager (Keyring) |
 | 📊 **Aktivitätslog-Analyse** | ASM-Aktivitätslogs einlesen und auswerten |
 | 📸 **Snapshot-Vergleich** | Automatischer Vergleich mit dem letzten Export |
+
+---
+
+## ⚠️ Bevor Sie starten: Wie ASM Konten identifiziert
+
+Dieser Abschnitt steht vor der Installation, weil er der einzige ist, dessen
+Missachtung echte Benutzerkonten zerstört.
+
+**Apple School Manager identifiziert jede Person ausschließlich über
+`person_id`.** Daraus folgt alles Weitere:
+
+| Was ASM sieht | Was ASM tut |
+|---------------|-------------|
+| Bekannte `person_id` | Datensatz wird **aktualisiert** (Name, Klasse, E-Mail ändern sich gefahrlos) |
+| Neue `person_id` | Konto wird **neu angelegt** |
+| `person_id` fehlt in der Lieferung | Konto wird **deaktiviert** |
+
+Eine geänderte `person_id` ist deshalb kein Rename, sondern **Löschen plus
+Neuanlegen**: Das alte Konto wird deaktiviert, ein leeres neues entsteht.
+E-Mails, Dateien und Anmeldungen bleiben beim deaktivierten Konto zurück.
+
+### Die wichtigste Fehlerquelle: „ADDED" heißt nicht „nicht in ASM"
+
+Die Diff-Ansicht vergleicht gegen den **lokalen Snapshot des letzten Exports**,
+nicht gegen ASM. Ist dieser Snapshot veraltet, dann gilt:
+
+- Eine Zeile mit Status **ADDED** kann längst ein aktives ASM-Konto haben.
+  Nimmt man sie heraus, **deaktiviert** man dieses Konto.
+- Eine Zeile mit Status **DELETED** kann in ASM nie existiert haben.
+  Behält man sie, **erzeugt** man ein Dublettenkonto.
+
+> Ein technisch fehlerfreier Upload — ASM quittiert ihn mit
+> `COMPLETED_WITH_SUCCESS` — sagt nichts darüber aus, ob der Inhalt richtig war.
+> Der Statusbericht bestätigt nur, dass ASM die Datei verarbeiten konnte.
+
+**Deshalb gibt es die Spalte „In ASM"** in der Diff-Ansicht. Sie beantwortet
+die andere Frage — hat ASM diese Person wirklich? — mit drei Zuständen:
+
+| Anzeige | Bedeutung |
+|---------|-----------|
+| `Ja` | Aktives Konto in ASM. Zeile herausnehmen = Konto deaktivieren. |
+| `Nein` | ASM kennt die ID nicht oder hat sie deaktiviert. Zeile behalten = neues Konto. |
+| `?` | Keine belastbare Auskunft. **Gilt als gefährlich, nicht als unbedenklich.** |
+
+Belege dafür bezieht die App aus (1) einem ASM-Aktivitätslog — Apples eigenem
+Protokoll, das auch außerhalb der App angelegte Konten kennt, aber nur die
+Personen nennt, die sich bei diesem Sync geändert haben — und (2) einem
+Snapshot, der nachweislich hochgeladen wurde. Ein bloß exportiertes ZIP zählt
+nicht: es kann nie bei Apple angekommen sein.
+
+Vor jedem Export prüft die App die getroffenen Entscheidungen und benennt
+riskante **namentlich**, bevor irgendetwas ASM erreicht.
+
+### Empfehlungen für den Produktivbetrieb
+
+1. **Erster Lauf ohne Upload.** Exportieren Sie ein ZIP und sehen Sie es an,
+   bevor Sie zum ersten Mal hochladen.
+2. **Aktivitätslog laden** (Settings → *Load Activity Log as ASM Evidence*),
+   bevor Sie Zeilen abwählen.
+3. **Bei `?` nichts abwählen.** Ohne Beleg ist jede Abwahl ein Blindflug.
+4. **Aktivitätslog nach jedem Upload prüfen** — `CREATED` und `DEACTIVATED`
+   bei Personal sind die Zahlen, die zählen.
 
 ---
 
@@ -104,12 +167,42 @@ Beim ersten Start öffnet sich automatisch die **Settings**-Seite. Folgende Eins
 | Feld | Beschreibung | Beispiel |
 |------|-------------|---------|
 | **Location ID** | Eindeutige Standort-Kennung für Apple School Manager | `LOC001` |
-| **Email Domain** | E-Mail-Domäne für generierte Adressen | `school.example` |
-| **Target School Year** | Schuljahr-Filter für Schuldock-Modus | `2025/2026` |
-| **Teacher Aliases** | Pfad zur Lehrer-Alias-Datei (JSON) | `teacher_aliases.json` |
-| **Subject Map** | Pfad zur Fächerzuordnungs-Datei (JSON) | `subject_map.json` |
+| **Email Domain** | Domäne Ihrer Managed Apple Accounts | `school.example` |
+| **Staff ID source** | *(nur Anzeige)* Wie `person_id` für Personal gebildet wird | siehe unten |
+| **Target School Year** | Schuljahr-Filter für Schuldock-Modus – **leer = automatisch** | leer |
+| **Teacher Aliases** | Pfad zur Lehrer-Alias-Datei (JSON) | leer |
+| **Subject Map** | Pfad zur Fächerzuordnungs-Datei (JSON) | leer |
 
-Die Pfade zu `teacher_aliases.json` und `subject_map.json` können leer gelassen werden – dann werden die mitgelieferten Standarddateien verwendet.
+**Location ID** und **Email Domain** sind Pflicht. Ohne sie verweigert die App
+die Erzeugung und nennt beim Klick auf *Run* die fehlenden Felder — jede
+erzeugte Adresse und jeder Datensatz trägt beide Werte.
+
+Die Pfade zu `teacher_aliases.json` und `subject_map.json` können leer bleiben –
+dann werden die mitgelieferten Standarddateien verwendet.
+
+> **Target School Year leer lassen**, sofern Sie keinen Grund für das Gegenteil
+> haben. Ein stehengebliebener Wert importiert nach dem Schuljahreswechsel
+> stillschweigend die Kurse des Vorjahres.
+
+#### 1a. Staff ID source — einmalig, nicht änderbar
+
+Bestimmt, woraus die `person_id` einer Lehrkraft gebildet wird. Das Feld ist
+**absichtlich schreibgeschützt**: eine Änderung würde jedes vorhandene
+Personal-Konto deaktivieren und neu anlegen.
+
+| Wert | Für wen |
+|------|---------|
+| `interne_id` (SIS-UUID) | **Voreinstellung bei Neuinstallation.** Die ID ändert sich bei Namensänderungen nie. Für Schulen ohne bestehende ASM-Personalkonten. |
+| `name` (`vorname.nachname`) | Für Installationen, deren Konten bereits so angelegt sind und die deshalb nicht umgeschlüsselt werden können. |
+
+Schülerkonten nutzen immer die SIS-ID und sind dadurch von Namensänderungen
+grundsätzlich nicht betroffen.
+
+Bei `interne_id` bleibt die E-Mail-Adresse namensbasiert
+(`vorname.nachname@ihre-domain.de`) — eine UUID als Postfach wäre unbenutzbar.
+Lehrkräfte, die nur in einem Kursexport vorkommen und keine SIS-ID mitbringen,
+erhalten weiterhin eine namensbasierte ID; ein gemischter Bestand ist in diesem
+Modus normal.
 
 #### 2. SFTP-Upload (SFTP Upload)
 
@@ -190,10 +283,31 @@ Jede Zeile ist farblich markiert:
 
 | Farbe | Status | Bedeutung |
 |-------|--------|-----------|
-| 🟢 Grün | **Added** | Neuer Eintrag |
+| 🟢 Grün | **Added** | Nicht im Snapshot — **nicht** zwingend neu in ASM |
 | 🟡 Gelb | **Changed** | Geänderter Eintrag |
-| 🔴 Rot | **Deleted** | Entfernter Eintrag |
+| 🔴 Rot | **Deleted** | Nicht mehr in den Quelldaten |
 | ⚪ Weiß | **Unchanged** | Unveränderter Eintrag (standardmäßig ausgeblendet) |
+
+Der Status beschreibt den Vergleich mit dem **lokalen Snapshot**, nicht mit ASM.
+Bei Personen beantwortet die Spalte **In ASM** (`Ja` / `Nein` / `?`) die
+eigentlich entscheidende Frage — siehe
+[Wie ASM Konten identifiziert](#️-bevor-sie-starten-wie-asm-konten-identifiziert).
+
+#### Spalte „Apply"
+
+Jede Zeile mit Status Added, Changed oder Deleted hat ein Häkchen. Es bedeutet
+je nach Status etwas anderes:
+
+| Status | Häkchen gesetzt | Häkchen entfernt |
+|--------|-----------------|------------------|
+| **Added** | Datensatz wird geliefert (Konto entsteht oder bleibt) | Datensatz fehlt in der Lieferung — **ein vorhandenes Konto wird dadurch deaktiviert** |
+| **Changed** | neue Werte werden geliefert | alte Werte aus dem Snapshot werden geliefert |
+| **Deleted** | Löschung bestätigt, Datensatz entfällt | Datensatz wird erneut geliefert — **existiert er in ASM nicht, entsteht ein neues Konto** |
+
+Nimmt man eine Person heraus, verlieren Zeilen, die auf sie verweisen, ihr Ziel.
+Die App entfernt solche Verweise selbst — ASM lehnt eine Lieferung mit
+ungültigen Verweisen sonst komplett ab — und benennt vorher, was betroffen ist:
+Kurslehrkraft-Zuordnung wird geleert, Kursbelegungen der Person entfallen.
 
 #### Schaltflächen pro Tab
 
@@ -204,9 +318,14 @@ Jede Zeile ist farblich markiert:
 | **Select All Deleted** | Alle gelöschten Zeilen markieren |
 | **Show unchanged** | Unveränderte Zeilen ein-/ausblenden |
 | **Approve All Changes** | Alle Änderungen (außer Löschungen) genehmigen |
-| **Approve All Deletions** | Alle Löschungen bestätigen |
+| **Approve All Deletions** | Alle Löschungen bestätigen (mit Rückfrage) |
+| **Keep all N deletions** | Alle Löschungen ablehnen, Datensätze behalten |
 
-> ⚠️ **Wichtig:** Gelöschte Einträge (rot) müssen **aktiv bestätigt** werden, indem sie markiert werden! Sie werden nicht automatisch in den Export übernommen.
+*Keep all N deletions* erscheint unten neben der Export-Sperre, solange
+Löschungen unentschieden sind.
+
+> ⚠️ **Wichtig:** Löschungen (rot) müssen **aktiv entschieden** werden — bestätigt
+> oder abgelehnt. Bis dahin bleibt der Export gesperrt.
 
 #### Export-Schaltflächen (unten)
 
@@ -313,12 +432,23 @@ Ordnet Fach-Kürzel den vollen Fachnamen zu:
 
 ### locations.csv
 
-Optionale Standort-Zuordnungstabelle für `location_id` → `location_name`:
+Optionale Standort-Zuordnungstabelle für `location_id` → `location_name`.
+Als Vorlage liegt `locations.example.csv` im Repository:
 
 ```csv
 location_id,location_name
-LOC001,Example School
+LOC001,Beispielschule Musterstadt
 ```
+
+Kopieren Sie die Datei nach `locations.csv` und tragen Sie Ihre Werte ein — die
+`location_id` muss der Einstellung *Location ID* entsprechen. Fehlt die Datei,
+verwendet der Export die `location_id` auch als Namen; das ist gültig, nur
+weniger lesbar.
+
+> `locations.csv` und `teacher_aliases.json` sind bewusst von der
+> Versionskontrolle ausgenommen, da sie Ihre Schule bzw. reale Personen
+> benennen. Versioniert sind nur die Vorlagen `locations.example.csv` und
+> `teacher_aliases.empty.json`.
 
 ---
 
@@ -538,5 +668,5 @@ python -m pytest tests/ -v --cov=asm_generator --cov=gui --cov-report=html
 | **„paramiko is not installed“** | `pip install paramiko` ausführen |
 | **CSV wird nicht erkannt / Encoding-Fehler** | Die App erkennt automatisch UTF-8, UTF-8-SIG und (via chardet) andere Encodings |
 | **Snapshot beschädigt** | `%LOCALAPPDATA%\ASMGenerator\snapshot.json` löschen – die App behandelt den nächsten Lauf als Ersteinrichtung |
-| **Einstellungen zurücksetzen** | `%LOCALAPPDATA%\ASMGenerator\settings.json` löschen |
+| **Einstellungen zurücksetzen** | `%LOCALAPPDATA%\ASMGenerator\settings.json` löschen. Nicht zusammen mit `snapshot.json` löschen, wenn es in ASM schon Personalkonten gibt: ohne beide Dateien gilt die Installation als neu, und *Staff ID source* springt auf `interne_id` – das ersetzt beim nächsten Upload jedes Personalkonto |
 | **SFTP-Passwort vergessen** | Im Windows-Credential-Manager unter „Windows-Anmeldeinformationen“ nach „asm-generator-sftp“ suchen |

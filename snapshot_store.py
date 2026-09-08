@@ -13,13 +13,13 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-import platformdirs
-
 from asm_generator.config import GeneratorResult
+from settings_store import _DATA_DIR
 
-SNAPSHOT_DIR  = Path(platformdirs.user_data_dir("ASMGenerator", appauthor=False))
+SNAPSHOT_DIR  = _DATA_DIR
 SNAPSHOT_PATH = SNAPSHOT_DIR / "snapshot.json"
 
 
@@ -46,8 +46,30 @@ def load_snapshot() -> GeneratorResult | None:
     )
 
 
-def save_snapshot(result: GeneratorResult) -> None:
+def load_provenance() -> dict:
+    """How the snapshot was produced: ``{"saved_at": iso, "via": "upload"|"export"}``.
+
+    Empty when the file is missing, unreadable, or was written before provenance
+    existed. Empty means *unknown*, never *safe*: a snapshot of unknown origin
+    may predate a change in how ids are built, in which case its ADDED/DELETED
+    labels describe the file, not ASM — so holding a row back can deactivate a
+    live account, and keeping one can create a duplicate.
+    """
+    try:
+        with open(SNAPSHOT_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    prov = data.get("provenance")
+    return prov if isinstance(prov, dict) else {}
+
+
+def save_snapshot(result: GeneratorResult, *, via: str = "export") -> None:
     """Atomically write GeneratorResult to snapshot.json.
+
+    ``via`` records what the snapshot is evidence of. Only ``"upload"`` means
+    ASM was actually handed these rows; ``"export"`` produced a ZIP that may
+    never have been sent.
 
     Atomic strategy: write to a temp file on the SAME volume, then os.replace().
     The temp file dir MUST be SNAPSHOT_DIR (not tempfile.gettempdir()) to ensure
@@ -65,6 +87,10 @@ def save_snapshot(result: GeneratorResult) -> None:
         "classes":  result.classes,
         "rosters":  result.rosters,
         "warnings": result.warnings,
+        "provenance": {
+            "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "via": via,
+        },
     }
 
     fd, tmp_path = tempfile.mkstemp(dir=SNAPSHOT_DIR, suffix=".tmp")

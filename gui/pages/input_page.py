@@ -218,15 +218,20 @@ class InputPage(QWidget):
         self._monolith_row.setVisible(not legacy)
 
     def _on_run_clicked(self) -> None:
-        settings = self._controller.get_settings() if self._controller else {}
-        if not (settings.get("email_domain", "") or "").strip():
-            box = MessageBox(
-                "Missing Setting",
-                "Please set Email Domain in Settings before running.\n"
-                "Email addresses are generated as firstname.lastname@emaildomain.",
+        # Checked for both modes and before anything else: every account this
+        # app creates carries the location and the mail domain, so a blank one
+        # is not a detail to discover after the files have been chosen.
+        missing = self._controller.missing_required_settings() if self._controller else []
+        if missing:
+            MessageBox(
+                "Finish setup first",
+                "Set these in Settings before generating:\n\n  "
+                + "\n  ".join(missing)
+                + "\n\nThe Location ID identifies your school inside Apple School "
+                  "Manager, and the Email Domain is the one your Managed Apple "
+                  "Accounts use — for example 'school.example'.",
                 self.window(),
-            )
-            box.exec()
+            ).exec()
             return
 
         if self._input_mode == "schuldock":
@@ -254,6 +259,17 @@ class InputPage(QWidget):
             self._input_mode,
             self._monolith_paths,
         )
+
+    def refresh_setup_hint(self) -> None:
+        """Say what setup is outstanding, before Run is pressed rather than after.
+
+        Called on startup and again whenever Settings is saved.
+        """
+        missing = self._controller.missing_required_settings() if self._controller else []
+        if missing:
+            self._status_label.setText(
+                "Setup incomplete — set " + " and ".join(missing) + " in Settings"
+            )
 
     def on_run_complete(self) -> None:
         """Called by AppController after worker finishes successfully."""

@@ -304,6 +304,28 @@ def extract_baseline_from_activity_log(
     )
 
 
+def load_person_state(path: str | Path) -> dict[str, bool]:
+    """``{person_id: is_active}`` from the latest successful event per person.
+
+    An activity log is a delta, not a census: it names only the people that
+    changed in that sync. An id missing from the result therefore means the log
+    says nothing about them — never that ASM lacks the account. Callers must
+    treat absence as unknown, which is why this returns a plain membership map
+    rather than a pair of sets that would invite `not in active` as a test.
+    """
+    rows = parse_activity_log(path)["sections"]["person"]
+    state: dict[str, bool] = {}
+    for person_id, row in _latest_by_person_id(rows).items():
+        if (row.get("operation_status", "") or "").strip().upper() != "SUCCESS":
+            continue  # a failed op tells us nothing about the resulting state
+        substatus = (row.get("operation_substatus", "") or "").strip().upper()
+        if substatus in {"ADDED", "CREATED", "UPDATED"}:
+            state[person_id] = True
+        elif substatus in {"DEACTIVATED", "DELETED"}:
+            state[person_id] = False
+    return state
+
+
 def extract_active_staff_from_activity_log(
     path: str | Path,
     *,

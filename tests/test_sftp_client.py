@@ -110,7 +110,7 @@ def test_check_connection_success_returns_connected_message(
     ("error", "expected"),
     [
         (
-            socket.timeout("too slow"),
+            TimeoutError("too slow"),
             "Connection timed out (upload.appleschoolcontent.com:22).",
         ),
         (
@@ -243,7 +243,7 @@ def test_upload_file_maps_auth_timeout_and_dns_errors(
     with pytest.raises(RuntimeError, match="Authentication failed — check username and password."):
         sftp_client.upload_file("asm_export.zip", username="upload-user", password="bad")
 
-    monkeypatch.setattr(socket, "create_connection", lambda *_args, **_kwargs: (_ for _ in ()).throw(socket.timeout("late")))
+    monkeypatch.setattr(socket, "create_connection", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("late")))
     with pytest.raises(RuntimeError, match=r"Connection timed out \(upload\.appleschoolcontent\.com:22\)\."):
         sftp_client.upload_file("asm_export.zip", username="upload-user", password="pw")
 

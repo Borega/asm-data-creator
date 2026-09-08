@@ -1,8 +1,5 @@
-import pytest
 from asm_generator.config import GeneratorResult
-from diff_engine import (
-    compute_diff, DiffStatus, RowDiff, TableDiff, DiffResult
-)
+from diff_engine import DiffResult, DiffStatus, compute_diff
 
 
 def _make_result(students=None, staff=None, courses=None, classes=None, rosters=None):

@@ -83,6 +83,10 @@ COMPARISON_RESULTS*.txt
 !subject_map.json
 teacher_aliases.json
 !teacher_aliases.empty.json
+# locations.csv names the actual school, so it stays ignored; the example is
+# what a new school copies. Every file bundled by asm_generator.spec must be
+# tracked — see tests/test_packaging_spec.py.
+!locations.example.csv
 
 # Keep official ASM template CSVs required by writer
 !asmtemplates/

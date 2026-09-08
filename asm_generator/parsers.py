@@ -137,15 +137,31 @@ def _split_offers(raw: str, target_school_year: str = "") -> list[str]:
     return out
 
 
+def _pick(row: dict, *names: str) -> str:
+    """First non-empty value among *names*.
+
+    Schuldock renames export columns between releases (``Klassennamen`` became
+    ``Klassen (aktiv)``, ``Anmeldekennung`` became ``Benutzerkennung``, …).
+    Listing the current name first and the historic ones after keeps older
+    exports parsable without a second code path.
+    """
+    for name in names:
+        value = (row.get(name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _class_from_row(row: dict) -> str:
-    """Extract a compact class label from monolith fields."""
-    class_name = (row.get("Klassennamen", "") or "").strip()
-    if class_name:
-        return class_name
-    raw = (row.get("Klassen", "") or "").strip()
+    """Extract the active main class label (e.g. '5a') from monolith fields."""
+    active = _pick(row, "Klassen (aktiv)", "Klassennamen")
+    if active:
+        return active.split(",")[0].strip()
+    raw = _pick(row, "Klassen (alle)", "Klassen")
     if not raw:
         return ""
-    return raw.split("-", 1)[0].strip()
+    # Historic "Klassen" held internal group names ('5a-2025/2026-Klasse-rissen').
+    return raw.split(",")[0].split("-", 1)[0].strip()
 
 
 def parse_monolith(paths: list, target_school_year: str = "") -> dict:
@@ -172,21 +188,22 @@ def parse_monolith(paths: list, target_school_year: str = "") -> dict:
         reader = csv.DictReader(io.StringIO(text), delimiter=";")
         for row in reader:
             role = (row.get("Rolle", "") or "").strip()
-            raw_offers = (row.get("Angebote", "") or "").strip()
-            class_raw = (row.get("Klassen", "") or "").strip()
-            m = re.search(r"(\d{4}/\d{4})", class_raw)
-            if m:
+            raw_offers = _pick(row, "Angebote")
+            # Vote on the school year from the offer tokens themselves — they are
+            # what gets filtered, and every enrolled person carries them.
+            for m in re.finditer(r"(\d{4}/\d{4})", raw_offers):
                 year_counts[m.group(1)] = year_counts.get(m.group(1), 0) + 1
             item = {
                 "nachname": (row.get("Nachname", "") or "").strip(),
                 "vorname": (row.get("Vorname", "") or "").strip(),
                 "rufname": (row.get("Rufname", "") or "").strip(),
-                "email": (row.get("E-Mail-Adressen der weiteren Schulen", "") or "").strip(),
-                "anmeldekennung": (row.get("Anmeldekennung", "") or "").strip(),
+                "email": _pick(row, "Weitere E-Mail-Adressen", "E-Mail-Adressen der weiteren Schulen"),
+                "anmeldekennung": _pick(row, "Benutzerkennung", "Anmeldekennung"),
                 "status": (row.get("Status", "") or "").strip(),
                 "quelle": (row.get("Quelle", "") or "").strip(),
                 "abbr": (row.get("Kürzel", "") or "").strip(),
                 "class_name": _class_from_row(row),
+                "jahrgangsstufe": _pick(row, "Jahrgangsstufe"),
                 "interne_id": (row.get("Interne ID", "") or "").strip(),
                 "export_id": (row.get("Export ID", "") or "").strip(),
                 "raw_offers": raw_offers,
@@ -205,6 +222,16 @@ def parse_monolith(paths: list, target_school_year: str = "") -> dict:
             students.append(item)
         elif item["role"] == "Lehrkraft":
             staff_rows.append(item)
+
+    # Schema-drift guard: a renamed column reads as empty for every row rather
+    # than raising, which is how four fields went silently blank at once.
+    # Only the class label is guarded — losing 'Jahrgangsstufe' alone still
+    # leaves the class-name fallback, which is what older exports always used.
+    if students and not any(s["class_name"] for s in students):
+        warnings.append(
+            "WARNING: no student class names found — the export is missing the "
+            "'Klassen (aktiv)' column (renamed?); grade levels will be blank."
+        )
 
     staff_by_offer: dict[str, list[dict]] = {}
     for person in staff_rows:
@@ -265,6 +292,10 @@ def parse_monolith(paths: list, target_school_year: str = "") -> dict:
                 "email_address": (person.get("email", "") or "").strip(),
                 "person_id": "",
                 "sis_username": (person.get("anmeldekennung", "") or "").strip(),
+                # Survives renames (verified across four exports), so it is the
+                # key an ASM person_id can be pinned to.
+                "_uid": (person.get("interne_id", "") or "").strip()
+                or (person.get("export_id", "") or "").strip(),
                 "_source": "monolith",
             }
             continue
@@ -274,6 +305,8 @@ def parse_monolith(paths: list, target_school_year: str = "") -> dict:
             existing["email_address"] = (person.get("email", "") or "").strip()
         if not existing.get("sis_username"):
             existing["sis_username"] = (person.get("anmeldekennung", "") or "").strip()
+        if not existing.get("_uid"):
+            existing["_uid"] = (person.get("interne_id", "") or "").strip()
 
     teacher_rows = list(teacher_rows_by_key.values())
 

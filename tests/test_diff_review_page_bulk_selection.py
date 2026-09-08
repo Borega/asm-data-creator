@@ -8,8 +8,8 @@ import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
-from diff_engine import DiffStatus, RowDiff, TableDiff
-from gui.pages.diff_review_page import _TabWidget
+from diff_engine import DiffResult, DiffStatus, RowDiff, TableDiff
+from gui.pages.diff_review_page import DiffReviewPage, _TabWidget
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -84,6 +84,79 @@ def _status_button(tab: _TabWidget, status: DiffStatus):
     attr = attr_map[status]
     assert hasattr(tab, attr), f"Missing bulk-selection button: {attr}"
     return getattr(tab, attr)
+
+
+def test_keep_all_deletions_satisfies_the_gate_without_deleting_anything(qapp: QApplication):
+    """Unticked already means keep; this records that it was a decision."""
+    tab = _TabWidget(
+        tab_key="students",
+        key_columns=["person_id", "first_name", "last_name", "grade_level", "email_address"],
+    )
+    tab.populate(_mixed_students_table())
+    assert tab.count_unreviewed_deletions() == 1, "gate blocks before any decision"
+
+    assert tab.keep_all_deletions() == 1
+    assert tab.count_unreviewed_deletions() == 0, "gate is satisfied"
+
+    ids = {r["person_id"] for r in tab.get_approved_records()}
+    assert "s-deleted-1" in ids, "the record must be retained, not deleted"
+
+
+def test_keep_all_deletions_does_not_disturb_other_statuses(qapp: QApplication):
+    tab = _TabWidget(
+        tab_key="students",
+        key_columns=["person_id", "first_name", "last_name", "grade_level", "email_address"],
+    )
+    tab.populate(_mixed_students_table())
+    before = {
+        m.row_diff.record_id: m.checkbox_item.checkState()
+        for m in tab._row_metas
+        if m.checkbox_item and m.row_diff.status != DiffStatus.DELETED
+    }
+
+    tab.keep_all_deletions()
+
+    after = {
+        m.row_diff.record_id: m.checkbox_item.checkState()
+        for m in tab._row_metas
+        if m.checkbox_item and m.row_diff.status != DiffStatus.DELETED
+    }
+    assert before == after and before, "ADDED/CHANGED decisions must be untouched"
+
+
+def test_added_rows_default_to_creating_but_can_be_held_back(qapp: QApplication):
+    """Schuldock keeps listing leavers; creating their account is work to undo."""
+    tab = _TabWidget(
+        tab_key="students",
+        key_columns=["person_id", "first_name", "last_name", "grade_level", "email_address"],
+    )
+    tab.populate(_mixed_students_table())
+
+    added = [m for m in tab._row_metas if m.row_diff.status == DiffStatus.ADDED]
+    assert all(m.checkbox_item is not None for m in added), "ADDED needs a checkbox"
+    assert all(m.checkbox_item.checkState() == Qt.CheckState.Checked for m in added)
+
+    ids = {r["person_id"] for r in tab.get_approved_records()}
+    assert {"s-added-1", "s-added-2"} <= ids
+
+    added[0].checkbox_item.setCheckState(Qt.CheckState.Unchecked)
+    ids = {r["person_id"] for r in tab.get_approved_records()}
+    assert "s-added-1" not in ids, "an unticked ADDED row must not reach ASM"
+    assert "s-added-2" in ids
+    assert "s-unchanged-1" in ids, "holding one row back changes nothing else"
+
+
+def test_holding_back_an_added_row_never_falls_back_to_a_snapshot(qapp: QApplication):
+    """There is no previous version of a new person — the row just disappears."""
+    tab = _TabWidget(
+        tab_key="students",
+        key_columns=["person_id", "first_name", "last_name", "grade_level", "email_address"],
+    )
+    tab.populate(TableDiff(rows=[_row("s-added-1", DiffStatus.ADDED)]))
+
+    tab._row_metas[0].checkbox_item.setCheckState(Qt.CheckState.Unchecked)
+
+    assert tab.get_approved_records() == []
 
 
 @pytest.mark.parametrize("status", [DiffStatus.ADDED, DiffStatus.CHANGED, DiffStatus.DELETED])
@@ -253,3 +326,118 @@ def test_status_toggle_is_deterministic_over_many_rows(qapp: QApplication, statu
     ]
     assert all(state == Qt.CheckState.Checked for state in changed_states)
     assert all(state == Qt.CheckState.Unchecked for state in deleted_states)
+
+
+# ---------------------------------------------------------------------------
+# Acting on a selection, and filtering
+# ---------------------------------------------------------------------------
+
+_KEY_COLUMNS = ["person_id", "first_name", "last_name", "grade_level", "email_address"]
+
+
+def _tab(table_diff: TableDiff) -> _TabWidget:
+    tab = _TabWidget(tab_key="students", key_columns=_KEY_COLUMNS)
+    tab.populate(table_diff)
+    return tab
+
+
+def test_approve_selected_confirms_deletions_and_clears_the_gate(qapp: QApplication):
+    tab = _tab(_mixed_students_table())
+    assert tab.count_unreviewed_deletions() == 1
+
+    _status_button(tab, DiffStatus.DELETED).click()   # select the deleted rows
+    tab._decide_selected(approve=True)
+
+    deleted = [m for m in tab._row_metas if m.row_diff.status == DiffStatus.DELETED]
+    assert all(m.checkbox_item.checkState() == Qt.CheckState.Checked for m in deleted)
+    # blockSignals means _on_item_changed never fires — reviewed must be set directly.
+    assert all(m.reviewed for m in deleted)
+    assert tab.count_unreviewed_deletions() == 0
+    approved_ids = {r["person_id"] for r in tab.get_approved_records()}
+    assert "s-deleted-1" not in approved_ids
+
+
+def test_keep_selected_marks_deletions_reviewed_without_deleting_them(qapp: QApplication):
+    """Keeping a record is a decision; it used to require ticking and unticking."""
+    tab = _tab(_mixed_students_table())
+
+    _status_button(tab, DiffStatus.DELETED).click()
+    tab._decide_selected(approve=False)
+
+    deleted = [m for m in tab._row_metas if m.row_diff.status == DiffStatus.DELETED]
+    assert all(m.checkbox_item.checkState() == Qt.CheckState.Unchecked for m in deleted)
+    assert all(m.reviewed for m in deleted)
+    assert tab.count_unreviewed_deletions() == 0
+    approved_ids = {r["person_id"] for r in tab.get_approved_records()}
+    assert "s-deleted-1" in approved_ids, "an un-approved deletion must stay in the export"
+
+
+def test_decide_selected_ignores_rows_hidden_by_the_filter(qapp: QApplication):
+    tab = _tab(
+        TableDiff(rows=[_row("keep-me", DiffStatus.DELETED), _row("other-1", DiffStatus.DELETED)])
+    )
+
+    tab._on_filter_changed("keep-me")
+    visible = [m for m in tab._row_metas if not tab._table.isRowHidden(m.table_row)]
+    assert [m.row_diff.record_id for m in visible] == ["keep-me"]
+
+    _status_button(tab, DiffStatus.DELETED).click()   # selects visible rows only
+    tab._decide_selected(approve=True)
+
+    by_id = {m.row_diff.record_id: m for m in tab._row_metas}
+    assert by_id["keep-me"].reviewed
+    assert not by_id["other-1"].reviewed, "a filtered-away row must not be decided"
+    assert tab.count_unreviewed_deletions() == 1
+
+
+def test_filter_and_unchanged_toggle_compose(qapp: QApplication):
+    tab = _tab(_mixed_students_table())
+    unchanged = _status_rows(tab, DiffStatus.UNCHANGED)
+
+    tab._toggle_unchanged()   # show unchanged
+    assert not any(tab._table.isRowHidden(r) for r in unchanged)
+
+    tab._on_filter_changed("s-added")
+    assert all(tab._table.isRowHidden(r) for r in unchanged), (
+        "filter must still hide unchanged rows that do not match"
+    )
+
+    tab._on_filter_changed("")
+    assert not any(tab._table.isRowHidden(r) for r in unchanged), (
+        "clearing the filter must restore the unchanged-toggle state"
+    )
+
+
+def test_changing_the_filter_drops_a_stale_selection(qapp: QApplication):
+    """Otherwise hidden rows stay selected and the select-all toggle inverts."""
+    tab = _tab(
+        TableDiff(rows=[_row("keep-me", DiffStatus.DELETED), _row("other-1", DiffStatus.DELETED)])
+    )
+
+    _status_button(tab, DiffStatus.DELETED).click()
+    assert _selected_rows(tab) == _status_rows(tab, DiffStatus.DELETED)
+
+    tab._on_filter_changed("keep-me")
+    assert _selected_rows(tab) == set(), "narrowing the view must clear the selection"
+
+    # …so the next select-all selects the filtered set instead of deselecting it.
+    _status_button(tab, DiffStatus.DELETED).click()
+    visible = {m.table_row for m in tab._row_metas if not tab._table.isRowHidden(m.table_row)}
+    assert _selected_rows(tab) == visible
+
+
+def test_export_gate_enables_after_approving_a_filtered_selection(qapp: QApplication):
+    page = DiffReviewPage(controller=None)
+    page.load_diff(
+        DiffResult(students=TableDiff(rows=[_row("s-deleted-1", DiffStatus.DELETED)]))
+    )
+    assert not page._export_btn.isEnabled()
+    assert "1 deletion" in page._gate_label.text()
+
+    tab = page._tab_widgets[0]
+    tab._on_filter_changed("s-deleted")
+    _status_button(tab, DiffStatus.DELETED).click()
+    tab._decide_selected(approve=True)
+
+    assert page._export_btn.isEnabled()
+    assert page._gate_label.text() == ""

@@ -8,13 +8,22 @@ from dataclasses import dataclass, field
 
 @dataclass
 class GeneratorConfig:
-    """Runtime configuration — replaces all module-level constants in generate_asm.py."""
+    """Runtime configuration — every value the pipeline needs, passed in explicitly.
+
+    Replaces the module-level constants the original single-file script used,
+    so nothing about any one school is baked into the code.
+    """
     location_id: str
     email_domain: str
     aliases_path: str          # Path to teacher_aliases.json
     subjects_path: str         # Path to subject_map.json
     input_mode: str = "schuldock"       # schuldock | legacy (legacy alias: monolith)
     target_school_year: str = ""        # e.g. 2025/2026; empty = no filter
+    # interne_id | name. Defaults to "name" because changing an existing staff
+    # person_id deactivates that ASM account and creates a new one — the safe
+    # default is the one that never moves an id. New installs are opted into
+    # "interne_id" by SettingsStore, which can tell a fresh install apart.
+    staff_id_source: str = "name"
 
     # Loaded lazily on first access by from_json(); also set when loading from JSON.
     _aliases: dict = field(default_factory=dict, repr=False)
@@ -101,3 +110,6 @@ class GeneratorResult:
     classes:  list = field(default_factory=list)
     rosters:  list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    # {Schuldock uuid: exported staff person_id} — not a CSV table; the
+    # export path uses it to pin new staff to the account ASM just made.
+    staff_uids: dict = field(default_factory=dict)
