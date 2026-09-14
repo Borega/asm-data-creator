@@ -13,9 +13,11 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QThreadPool
-from PyQt6.QtWidgets import QWidget
-from qfluentwidgets import MessageBox
+from PyQt6.QtCore import Qt, QThreadPool
+from PyQt6.QtWidgets import QApplication, QProgressDialog, QWidget
+from qfluentwidgets import InfoBar, InfoBarPosition, MessageBox, PushButton
+
+import update_check
 
 from activity_log import (
     extract_baseline_from_activity_log,
@@ -29,7 +31,12 @@ from backup_store import create_backup
 from diff_baseline import load_baseline_from_csv_source
 from diff_engine import compute_diff
 import person_pins
-from gui.workers import GeneratorWorker, SftpStatusWorker
+from gui.workers import (
+    GeneratorWorker,
+    SftpStatusWorker,
+    UpdateCheckWorker,
+    UpdateInstallWorker,
+)
 from settings_store import SettingsStore
 from sftp_client import check_connection as check_sftp_connection
 from sftp_client import upload_file
@@ -282,6 +289,14 @@ class AppController:
         # Validate upload capability once during startup — off the GUI thread so
         # an unreachable SFTP host cannot delay the window appearing.
         self._start_sftp_status_check()
+
+        self._update_release = None
+        self._update_message = "Not checked yet."
+        self._update_check_token = 0
+        self._update_worker = None  # keeps the running install worker alive
+        self._update_progress = None
+        if self._settings.get("check_for_updates", True):
+            self.start_update_check()
 
     def set_pages(self, input_page, diff_page, settings_page) -> None:
         """Called by MainWindow after all pages are instantiated."""
@@ -673,6 +688,110 @@ class AppController:
             self._diff_page.set_upload_available(self._sftp_ready, self._sftp_status_message)
         if self._settings_page is not None:
             self._settings_page.set_sftp_status(self._sftp_ready, self._sftp_status_message)
+
+    # ------------------------------------------------------------------
+    # Updates
+    # ------------------------------------------------------------------
+
+    def start_update_check(self) -> None:
+        """Ask GitHub for a newer release without blocking. Offline just leaves a status."""
+        self._update_check_token += 1
+        if not update_check.parse_version(update_check.current_version()):
+            # From source: nothing to compare, and no thread for tests to trip over.
+            self._set_update_status(None, "Development build — updates are only checked in the installed app.")
+            return
+        self._set_update_status(None, "Checking for updates…")
+        worker = UpdateCheckWorker(self._update_check_token)
+        worker.signals.checked.connect(self._on_update_checked)
+        worker.start()
+
+    def get_update_status(self) -> tuple[str, bool]:
+        return self._update_message, self._update_release is not None
+
+    def _set_update_status(self, release, message: str) -> None:
+        self._update_release = release
+        self._update_message = message
+        if self._settings_page is not None and hasattr(self._settings_page, "set_update_status"):
+            self._settings_page.set_update_status(message, release is not None)
+
+    def _on_update_checked(self, token: int, release, message: str) -> None:
+        if token != self._update_check_token:
+            return
+        self._set_update_status(release, message)
+        if release is None:
+            return
+        content = f"ASM Generator {release.tag} is available."
+        if update_check.staging_dir(update_check.install_dir()).exists():
+            content += " The last update could not replace the program folder — close any window showing it and try again."
+        bar = InfoBar.info(
+            title="Update available",
+            content=content,
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            duration=-1,
+            position=InfoBarPosition.BOTTOM,
+            parent=self._window,
+        )
+        button = PushButton("Update now")
+        button.clicked.connect(bar.close)
+        button.clicked.connect(self.install_update)
+        bar.addWidget(button)
+
+    def install_update(self) -> None:
+        release = self._update_release
+        if release is None or self._update_worker is not None:
+            return
+        problem = update_check.install_problem(release)
+        if problem:
+            MessageBox(
+                "Automatic update not possible",
+                f"{problem}\n\nDownload {release.tag} yourself from:\n{release.page}",
+                self._window,
+            ).exec()
+            return
+        confirm = MessageBox(
+            "Install update?",
+            f"Download ASM Generator {release.tag} ({release.size // 1_000_000} MB), then close "
+            "and restart the app.\n\nAn unfinished review is lost. The current version is kept "
+            "as a backup folder next to the program.",
+            self._window,
+        )
+        if not confirm.exec():
+            return
+
+        progress = QProgressDialog("Downloading update…", "Cancel", 0, 100, self._window)
+        progress.setWindowTitle("Updating ASM Generator")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        worker = UpdateInstallWorker(release, update_check.install_dir())
+        worker.signals.progress.connect(progress.setValue)
+        worker.signals.staged.connect(self._on_update_staged)
+        worker.signals.failed.connect(self._on_update_failed)
+        progress.canceled.connect(worker.cancel)
+        self._update_progress = progress
+        self._update_worker = worker
+        worker.start()
+        progress.show()
+
+    def _close_update_progress(self) -> None:
+        self._update_worker = None
+        if self._update_progress is not None:
+            self._update_progress.close()
+            self._update_progress = None
+
+    def _on_update_staged(self, staging: str) -> None:
+        self._close_update_progress()
+        update_check.launch_swap(
+            update_check.install_dir(), Path(staging), update_check.current_version()
+        )
+        QApplication.quit()
+
+    def _on_update_failed(self, message: str) -> None:
+        self._close_update_progress()
+        if message != "Update cancelled.":
+            MessageBox("Update failed", message, self._window).exec()
 
     def build_config(self) -> GeneratorConfig:
         """Build GeneratorConfig from current settings, resolving empty paths to bundled defaults."""

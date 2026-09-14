@@ -173,3 +173,10 @@ def test_hiddenimports_parser_fails_for_malformed_spec_structure():
 
     with pytest.raises(AssertionError, match="not properly closed"):
         _extract_hiddenimports_from_spec_text(malformed_spec_text)
+
+
+def test_spec_bundles_what_the_update_check_needs():
+    """Without VERSION the frozen app cannot tell its version; without the import it cannot start."""
+    spec_text = SPEC_PATH.read_text(encoding="utf-8")
+    assert "update_check" in _extract_hiddenimports_from_spec_text(spec_text)
+    assert ("VERSION", ".") in _extract_datas_from_spec_text(spec_text)

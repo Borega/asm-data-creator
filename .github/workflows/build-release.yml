@@ -75,6 +75,11 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+      # The app compares this with the latest release to offer updates.
+      - name: Stamp version
+        shell: pwsh
+        run: Set-Content -Path VERSION -Value "${{ steps.version.outputs.tag }}" -NoNewline
+
       - name: Build EXE with PyInstaller
         run: pyinstaller asm_generator.spec
 

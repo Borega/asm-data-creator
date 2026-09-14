@@ -17,9 +17,11 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+import update_check
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
+    CheckBox,
     HorizontalSeparator,
     InfoBar,
     InfoBarPosition,
@@ -242,6 +244,40 @@ class SettingsPage(QWidget):
         self._diff_baseline_label.setWordWrap(True)
         root.addWidget(self._diff_baseline_label)
 
+        root.addSpacing(16)
+        root.addWidget(HorizontalSeparator())
+        root.addSpacing(16)
+
+        # ---- Updates section ----
+        root.addWidget(SubtitleLabel("Updates"))
+        installed = update_check.current_version()
+        self._version_label = BodyLabel(
+            f"Installed version: {installed if update_check.parse_version(installed) else 'development build'}"
+        )
+        root.addWidget(self._version_label)
+
+        self._check_updates_box = CheckBox("Check for updates when the app starts")
+        self._check_updates_box.setToolTip("Saved with Save Settings.")
+        root.addWidget(self._check_updates_box)
+
+        update_row = QHBoxLayout()
+        update_row.setSpacing(8)
+        self._check_updates_btn = PushButton("Check for Updates")
+        self._check_updates_btn.setFixedHeight(self._FIELD_HEIGHT)
+        self._check_updates_btn.clicked.connect(self._on_check_updates_clicked)
+        update_row.addWidget(self._check_updates_btn)
+        self._install_update_btn = PrimaryPushButton("Update Now")
+        self._install_update_btn.setFixedHeight(self._FIELD_HEIGHT)
+        self._install_update_btn.setEnabled(False)
+        self._install_update_btn.clicked.connect(self._on_install_update_clicked)
+        update_row.addWidget(self._install_update_btn)
+        update_row.addStretch(1)
+        root.addLayout(update_row)
+
+        self._update_status_label = BodyLabel("Updates: not checked yet")
+        self._update_status_label.setWordWrap(True)
+        root.addWidget(self._update_status_label)
+
         root.addStretch()
 
     def _make_file_row(self, edit_attr: str, browse_cb) -> QWidget:
@@ -296,6 +332,7 @@ class SettingsPage(QWidget):
         existing["teacher_aliases_path"] = self._teacher_aliases_edit.text().strip()
         existing["subject_map_path"] = self._subject_map_edit.text().strip()
         existing["sftp_username"] = self._sftp_user_edit.text().strip()
+        existing["check_for_updates"] = self._check_updates_box.isChecked()
 
         password = self._sftp_password_edit.text()
         new_username = existing["sftp_username"]
@@ -600,6 +637,18 @@ class SettingsPage(QWidget):
             return compact
         return f"{compact[: max_chars - 1].rstrip()}…"
 
+    def set_update_status(self, message: str, available: bool) -> None:
+        self._update_status_label.setText(f"Updates: {message}")
+        self._install_update_btn.setEnabled(available)
+
+    def _on_check_updates_clicked(self) -> None:
+        if self._controller is not None:
+            self._controller.start_update_check()
+
+    def _on_install_update_clicked(self) -> None:
+        if self._controller is not None:
+            self._controller.install_update()
+
     def set_sftp_status(self, ok: bool, message: str) -> None:
         state = "Connected" if ok else "Not ready"
         compact_message = self._compact_status_message(message, self._STATUS_MESSAGE_MAX_CHARS)
@@ -630,10 +679,14 @@ class SettingsPage(QWidget):
         self._sftp_port_edit.setText(str(SFTP_PORT))
         self._sftp_user_edit.setText(settings.get("sftp_username", ""))
         self._sftp_password_edit.clear()
+        self._check_updates_box.setChecked(bool(settings.get("check_for_updates", True)))
 
         if self._controller is not None:
             ok, msg = self._controller.get_sftp_status()
             self.set_sftp_status(ok, msg)
+            get_update_status = getattr(self._controller, "get_update_status", None)
+            if get_update_status is not None:
+                self.set_update_status(*get_update_status())
 
         self._refresh_diff_baseline_label()
         self._refresh_asm_state_log_label()

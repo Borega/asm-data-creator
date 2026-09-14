@@ -37,6 +37,9 @@ a = Analysis(
         # writer.py::_load_location_name_map already degrades to location ids.
         ("teacher_aliases.empty.json", "."),
         ("subject_map.json", "."),
+        # CI writes the release tag into it before building; update_check
+        # compares it with the latest GitHub release.
+        ("VERSION", "."),
     ],
     hiddenimports=hiddenimports + [
         "asm_generator",
@@ -54,6 +57,7 @@ a = Analysis(
         "sftp_client",
         "sftp_credentials",
         "snapshot_store",
+        "update_check",
         "platformdirs",
         "paramiko",
         "keyring",

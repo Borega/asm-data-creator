@@ -132,9 +132,11 @@ riskante **namentlich**, bevor irgendetwas ASM erreicht.
 
 ### Als fertige EXE nutzen (Empfohlen)
 
-1. Den Ordner `dist/ASM-Generator/` von einem Administrator erhalten
-2. `ASM-Generator.exe` doppelklicken
-3. Beim ersten Start werden die SFTP-Einstellungen abgefragt
+1. Die ZIP-Datei der neuesten Version von der GitHub-Releases-Seite herunterladen
+2. In einen **eigenen, leeren Ordner** entpacken (z. B. `C:\Tools\ASM-Generator`) –
+   nur dann kann sich die App später selbst aktualisieren (siehe [Updates](#updates))
+3. `ASM-Generator.exe` doppelklicken
+4. Beim ersten Start werden die SFTP-Einstellungen abgefragt
 
 ### Aus dem Quellcode starten (Entwicklung)
 
@@ -336,7 +338,7 @@ Löschungen unentschieden sind.
 
 ### Settings-Seite – Einstellungen
 
-Die Settings-Seite ist in drei Bereiche unterteilt:
+Die Settings-Seite ist in vier Bereiche unterteilt:
 
 #### Configuration
 
@@ -357,6 +359,35 @@ Steuert, wogegen die aktuelle Generierung verglichen wird:
 | **Use CSV/ZIP/Monolith as Diff Baseline** | Früheren Export als Vergleichsbasis setzen |
 | **Use Last Export as Diff Baseline** | Letzten Export-Pfad als Vergleichsbasis setzen |
 | **Clear Diff Baseline** | Zurücksetzen auf Snapshot-Vergleich |
+
+#### Updates
+
+Die installierte App prüft beim Start im Hintergrund, ob auf GitHub eine neuere
+Version veröffentlicht wurde (abschaltbar über *Check for updates when the app
+starts*, gespeichert mit *Save Settings*). Ohne Internet bleibt es bei einer
+Statuszeile – die App funktioniert normal weiter.
+
+Ist eine neue Version verfügbar, erscheint ein Hinweis mit **Update now** (auch
+über **Update Now** in den Settings):
+
+1. Die ZIP-Datei der Version wird heruntergeladen (~115 MB) und gegen die von
+   GitHub veröffentlichte SHA-256-Prüfsumme geprüft. Stimmt sie nicht, wird nichts installiert.
+2. Die App schließt sich. Ein kleines Hilfsskript ersetzt den Programmordner und
+   startet die neue Version.
+3. Die bisherige Version bleibt als Ordner `ASM-Generator.old-<Version>` daneben
+   liegen (nur die jeweils letzte). Einstellungen, Snapshot und Pins liegen in
+   `%LOCALAPPDATA%` und sind nicht betroffen.
+
+Das automatische Update verweigert sich – mit Link zum manuellen Download –, wenn:
+
+- der Programmordner außer `ASM-Generator.exe` und `_internal` weitere Dateien
+  enthält (z. B. direkt in *Downloads* entpackt). Legen Sie die App in einen eigenen Ordner.
+- der Ordner nicht beschreibbar ist (z. B. unter *Program Files*).
+- zu wenig Speicherplatz frei ist.
+
+Versionen bis einschließlich v1.1.7 kennen ihre eigene Versionsnummer noch nicht
+und müssen **einmal manuell** aktualisiert werden. Aus dem Quellcode gestartet wird
+nie nach Updates gesucht.
 
 ---
 

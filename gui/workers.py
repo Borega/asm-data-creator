@@ -4,12 +4,14 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import tempfile
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
+import update_check
 from asm_generator import GeneratorConfig, GeneratorResult, generate
 
 if TYPE_CHECKING:
@@ -182,3 +184,58 @@ class SftpStatusWorker:
             )
         else:
             self.signals.finished.emit(self._token, False, "Unexpected SFTP connection response.")
+
+
+class _UpdateSignals(QObject):
+    checked = pyqtSignal(int, object, str)  # token, Release | None, message
+    progress = pyqtSignal(int)              # 0-100 while downloading
+    staged = pyqtSignal(str)                # unpacked new program folder
+    failed = pyqtSignal(str)
+
+
+class UpdateCheckWorker:
+    """Asks GitHub for the latest release off the GUI thread.
+
+    A daemon thread for the same reason as SftpStatusWorker: a slow network
+    must delay neither the window appearing nor the app closing.
+    """
+
+    def __init__(self, token: int) -> None:
+        self.signals = _UpdateSignals()
+        self._token = token
+
+    def start(self) -> None:
+        threading.Thread(target=self.run, name="update-check", daemon=True).start()
+
+    def run(self) -> None:
+        release, message = update_check.check()
+        self.signals.checked.emit(self._token, release, message)
+
+
+class UpdateInstallWorker:
+    """Downloads, verifies and unpacks a release beside the program folder."""
+
+    def __init__(self, release, target: Path) -> None:
+        self.signals = _UpdateSignals()
+        self._release = release
+        self._target = target
+        self._cancel = threading.Event()
+
+    def start(self) -> None:
+        threading.Thread(target=self.run, name="update-install", daemon=True).start()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                archive = update_check.download(
+                    self._release, Path(folder), self.signals.progress.emit, self._cancel.is_set
+                )
+                staging = update_check.stage(archive, self._target)
+        except Exception as exc:  # noqa: BLE001 - reported to the user, never kills the app
+            logger.warning("Update failed: %s", exc, exc_info=exc)
+            self.signals.failed.emit(str(exc))
+            return
+        self.signals.staged.emit(str(staging))

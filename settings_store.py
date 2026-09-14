@@ -41,6 +41,7 @@ _DEFAULTS: dict = {
     # id IS the account: changing it deactivates every teacher and creates them
     # again. So this default applies to a fresh install only; see load().
     "staff_id_source": "interne_id",  # interne_id | name
+    "check_for_updates": True,
 }
 
 
