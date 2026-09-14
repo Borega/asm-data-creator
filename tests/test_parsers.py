@@ -227,6 +227,30 @@ def test_parse_monolith_full_export_keeps_login_and_status_fields(tmp_path):
     assert result["teachers"][0]["sis_username"] == "lena.login"
 
 
+def test_parse_monolith_drops_inactive_people(tmp_path):
+    """Schuldock keeps leavers and other schools' staff as 'Inaktiv' — never export them."""
+    header = "Nachname;Vorname;Kürzel;Klassennamen;Angebote;Status;Rolle;Interne ID"
+    csv_file = tmp_path / "monolith_status.csv"
+    csv_file.write_text(
+        "\n".join([
+            header,
+            "Aktiv;Anna;;6a;6a Sp-2025/2026-Angebot-rissen;Aktiv;Lernende;stu-1",
+            "Weg;Ben;;;6a Sp-2025/2026-Angebot-rissen;Inaktiv;Lernende;stu-2",
+            "Leer;Cem;;6a;;;Lernende;stu-3",
+            "Lehrer;Lena;Lhr;;6a Sp-2025/2026-Angebot-rissen;Aktiv;Lehrkraft;tea-1",
+            "Fremd;Olaf;Fre;;6a Sp-2025/2026-Angebot-rissen;Inaktiv;Lehrkraft;tea-2",
+        ]),
+        encoding="utf-8",
+    )
+
+    result = parse_monolith([csv_file], target_school_year="2025/2026")
+
+    assert [s["nachname"] for s in result["students"]] == ["Aktiv", "Leer"]
+    assert [t["last_name"] for t in result["teachers"]] == ["Lehrer"]
+    assert [r["nachname"] for r in result["sections"][0]["rows"]] == ["Aktiv"]
+    assert [s["teacher_last"] for s in result["sections"]] == ["Lehrer"]
+
+
 def test_parse_monolith_exposes_all_teacher_rows_even_without_current_year_offers(tmp_path):
     csv_file = tmp_path / "monolith_teachers.csv"
     csv_file.write_text(

@@ -187,6 +187,12 @@ def parse_monolith(paths: list, target_school_year: str = "") -> dict:
         text = "".join(lines)
         reader = csv.DictReader(io.StringIO(text), delimiter=";")
         for row in reader:
+            # Schuldock keeps leavers and staff of other schools as "Inaktiv".
+            # Only "Aktiv" people belong in ASM. A blank status (older exports
+            # without the column) is kept, as before.
+            status = (row.get("Status", "") or "").strip()
+            if status and status != "Aktiv":
+                continue
             role = (row.get("Rolle", "") or "").strip()
             raw_offers = _pick(row, "Angebote")
             # Vote on the school year from the offer tokens themselves — they are
