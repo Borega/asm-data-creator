@@ -265,6 +265,8 @@ def parse_monolith(paths: list, target_school_year: str = "") -> dict:
                 ),
                 "klassenname": s["class_name"],
                 "angebotsname": offer,
+                # Rosters match on this, not the name: two students can share one.
+                "student_id": s["interne_id"] or s["export_id"],
             }
             for s in students_by_offer[offer]
         ]

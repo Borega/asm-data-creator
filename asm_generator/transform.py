@@ -614,11 +614,14 @@ def build_class_records(
     Returns (classes: list[dict], rosters: list[dict], warnings: list[str]).
     warnings contains messages about unmatched export student rows.
     """
-    # Build student lookup: (last_name, first_name) → person_id
-    student_pid_lookup: dict = {}
+    # Students are matched by the id Schuldock gives each row. Names are only a
+    # fallback for the legacy export, which carries no id — and since two
+    # students can share a name, a name that fits more than one matches nobody.
+    student_ids = {sr["person_id"] for sr in student_records}
+    students_by_name: dict = defaultdict(list)
     for sr in student_records:
         key = (sr["last_name"].strip(), sr.get("first_name", "").strip())
-        student_pid_lookup[key] = sr["person_id"]
+        students_by_name[key].append(sr["person_id"])
 
     # Pre-load aliases for teacher name resolution inside the loop
     aliases = config.load_aliases()
@@ -646,6 +649,13 @@ def build_class_records(
             e["teacher_pid"] for e in class_entries if e["teacher_pid"]
         ))
         class_id = f"cls-{slugify(an)}"
+        # ponytail: three instructor columns; ASM accepts up to instructor_id_15,
+        # add columns (writer header + diff) when a class actually needs them.
+        if len(teacher_pids) > 3:
+            warnings.append(
+                f"REVIEW: {an} has {len(teacher_pids)} teachers, but only three are "
+                f"exported — not listed for this class: {', '.join(teacher_pids[3:])}"
+            )
         instructor_ids = (teacher_pids + ["", "", ""])[:3]
 
         classes.append({
@@ -661,14 +671,27 @@ def build_class_records(
         seen_students: set = set()
         for entry in class_entries:
             for row in entry["rows"]:
-                lookup_key = (row["nachname"].strip(), row["vorname"].strip())
-                pid = student_pid_lookup.get(lookup_key)
-                if pid is None:
-                    first_word = row["vorname"].split()[0] if row["vorname"] else ""
-                    for (sln, sfn), spid in student_pid_lookup.items():
-                        if sln == row["nachname"] and sfn.split()[0] == first_word:
-                            pid = spid
-                            break
+                pid = (row.get("student_id", "") or "").strip()
+                if pid not in student_ids:
+                    pid = None
+                    last, first = row["nachname"].strip(), row["vorname"].strip()
+                    candidates = students_by_name.get((last, first), [])
+                    if not candidates:
+                        first_word = first.split()[:1]
+                        candidates = [
+                            spid
+                            for (sln, sfn), pids in students_by_name.items()
+                            if sln == last and sfn.split()[:1] == first_word
+                            for spid in pids
+                        ]
+                    if len(candidates) > 1:
+                        warnings.append(
+                            f"REVIEW: {row['vorname']} {row['nachname']} in {an} matches "
+                            f"{len(candidates)} students by name — enrolled nobody"
+                        )
+                        continue
+                    if candidates:
+                        pid = candidates[0]
                 if pid is None:
                     warnings.append(
                         f"WARNING: unmatched student "

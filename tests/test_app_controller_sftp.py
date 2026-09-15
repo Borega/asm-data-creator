@@ -30,6 +30,11 @@ def controller(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(ac_module.SettingsStore, "load", lambda: {"sftp_username": ""})
     monkeypatch.setattr(ac_module, "is_keyring_available", lambda: True)
     monkeypatch.setattr(ac_module, "get_password", lambda _username: "")
+    # Never the real Windows credential store: tests used to write into it and
+    # then silently depend on what an earlier test had left there.
+    monkeypatch.setattr(ac_module, "has_password", lambda _username: True)
+    monkeypatch.setattr(ac_module, "set_password", lambda _username, _password: None)
+    monkeypatch.setattr(ac_module, "delete_password", lambda _username: None)
     monkeypatch.setattr(
         ac_module,
         "check_sftp_connection",
@@ -171,7 +176,7 @@ def test_save_credentials_username_change_without_password_requires_new_secret(
 
     assert ok is False
     assert message == "Enter a password when changing SFTP username."
-    assert deleted == ["old-user"]
+    assert deleted == [], "a failed username change must keep the old password"
 
 
 def test_save_credentials_surfaces_store_error(controller, monkeypatch: pytest.MonkeyPatch):
@@ -206,32 +211,23 @@ def test_save_credentials_uses_override_password_before_keyring_fallback(
         raise AssertionError("get_password must not be called when password override is present")
 
     monkeypatch.setattr(ac_module, "get_password", _should_not_read)
-    monkeypatch.setattr(
-        ac_module,
-        "check_sftp_connection",
-        lambda username, _password: (True, f"Connected to upload.appleschoolcontent.com:22 as '{username}'."),
-    )
+    monkeypatch.setattr(ac_module, "set_password", lambda _username, _password: None)
 
     ok, message = controller.save_sftp_credentials("", "upload-user", "pw-from-ui")
 
     assert ok is True
-    assert message == "Connected to upload.appleschoolcontent.com:22 as 'upload-user'."
-    assert controller.get_sftp_status() == (True, "Connected to upload.appleschoolcontent.com:22 as 'upload-user'.")
+    assert message == "Credentials saved. The connection is checked in the background."
+    assert controller._sftp_recheck_pending is True
 
 
 def test_save_credentials_falls_back_to_keyring_when_override_missing(controller, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(ac_module, "get_password", lambda _username: "stored-secret")
-    monkeypatch.setattr(
-        ac_module,
-        "check_sftp_connection",
-        lambda _username, _password: (False, "Authentication failed — check username and password."),
-    )
 
-    ok, message = controller.save_sftp_credentials("", "upload-user", "")
+    ok, _message = controller.save_sftp_credentials("", "upload-user", "")
 
     assert ok is True
-    assert message == "Authentication failed — check username and password."
-    assert controller.get_sftp_status() == (False, "Authentication failed — check username and password.")
+    # Unverified until the background check reports — upload stays off meanwhile.
+    assert controller.get_sftp_status() == (False, controller.SFTP_CHECK_PENDING_MESSAGE)
 
 
 def test_save_credentials_missing_effective_password_keeps_upload_disabled(controller, monkeypatch: pytest.MonkeyPatch):
@@ -292,42 +288,39 @@ def test_test_connection_missing_password_after_keyring_lookup(controller, monke
     assert controller.test_sftp_connection("upload-user", "") == (False, "Missing SFTP password.")
 
 
-def test_repeated_test_clicks_keep_latest_status_after_save(controller, monkeypatch: pytest.MonkeyPatch):
-    statuses = [
-        (False, "Connection timed out (upload.appleschoolcontent.com:22)."),
-        (False, "DNS resolution failed for upload.appleschoolcontent.com: [Errno -2] Name or service not known"),
-        (True, "Connected to upload.appleschoolcontent.com:22 as 'upload-user'."),
-    ]
+def test_save_credentials_never_touches_the_network(controller, monkeypatch: pytest.MonkeyPatch):
+    """An unreachable host used to freeze Save for the full connect timeout."""
 
-    def _check(_username: str, _password: str):
-        return statuses.pop(0)
+    def _must_not_run(_username: str, _password: str):
+        raise AssertionError("save_sftp_credentials probed the SFTP host")
 
-    monkeypatch.setattr(ac_module, "check_sftp_connection", _check)
+    monkeypatch.setattr(ac_module, "check_sftp_connection", _must_not_run)
+    monkeypatch.setattr(ac_module, "set_password", lambda _username, _password: None)
 
-    results = [
-        controller.save_sftp_credentials("", "upload-user", "pw-1"),
-        controller.save_sftp_credentials("", "upload-user", "pw-2"),
-        controller.save_sftp_credentials("", "upload-user", "pw-3"),
-    ]
-
-    assert results == [
-        (True, "Connection timed out (upload.appleschoolcontent.com:22)."),
-        (True, "DNS resolution failed for upload.appleschoolcontent.com: [Errno -2] Name or service not known"),
-        (True, "Connected to upload.appleschoolcontent.com:22 as 'upload-user'."),
-    ]
-    assert controller.get_sftp_status() == (True, "Connected to upload.appleschoolcontent.com:22 as 'upload-user'.")
+    assert controller.save_sftp_credentials("", "upload-user", "pw")[0] is True
 
 
-def test_save_credentials_treats_non_boolean_connection_result_as_failure(controller, monkeypatch: pytest.MonkeyPatch):
-    """Defensive expectation from Q5: malformed SFTP check results must not enable upload."""
+def test_changed_credentials_are_checked_once_in_the_background(controller, monkeypatch: pytest.MonkeyPatch):
+    started: list[bool] = []
+    monkeypatch.setattr(controller, "_start_sftp_status_check", lambda: started.append(True))
+    monkeypatch.setattr(ac_module, "set_password", lambda _username, _password: None)
+    monkeypatch.setattr(ac_module.SettingsStore, "load", lambda: {"sftp_username": "upload-user"})
 
-    monkeypatch.setattr(ac_module, "check_sftp_connection", lambda _u, _p: ("yes", "malformed result"))
+    controller.save_sftp_credentials("", "upload-user", "pw")
+    controller.reload_settings()
+    controller.reload_settings()
 
-    ok, message = controller.save_sftp_credentials("", "upload-user", "pw")
+    assert started == [True], "one background check per save, none on a plain reload"
 
-    assert ok is True
-    assert message == "malformed result"
-    assert controller.get_sftp_status() == (False, "malformed result")
+
+def test_new_password_is_stored_before_the_old_one_is_deleted(controller, monkeypatch: pytest.MonkeyPatch):
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(ac_module, "set_password", lambda username, _pw: events.append(("store", username)))
+    monkeypatch.setattr(ac_module, "delete_password", lambda username: events.append(("delete", username)))
+
+    controller.save_sftp_credentials("old-user", "new-user", "pw")
+
+    assert events == [("store", "new-user"), ("delete", "old-user")]
 
 
 def test_analyze_activity_log_uses_last_result_staff_ids(controller, monkeypatch: pytest.MonkeyPatch):
@@ -673,6 +666,52 @@ def test_export_upload_attempts_backup_before_upload_and_saves_snapshot(controll
     assert call_order == ["write", "backup", "upload", "snapshot"]
     assert controller._diff_page.reset_calls == 1
     assert _MessageBoxDouble.shown[-1][0] == "Upload Successful"
+
+
+def test_upload_that_succeeded_but_could_not_save_the_snapshot_says_so(controller, monkeypatch: pytest.MonkeyPatch):
+    import asm_generator.writer as writer_module
+
+    controller._sftp_ready = True
+    controller._settings["sftp_username"] = "upload-user"
+    controller._diff_page = _DiffUploadPageDouble()
+
+    monkeypatch.setattr(ac_module, "MessageBox", _MessageBoxDouble)
+    _MessageBoxDouble.next_results = []
+    _MessageBoxDouble.shown = []
+    monkeypatch.setattr(ac_module, "get_password", lambda _username: "pw")
+    monkeypatch.setattr(writer_module, "write_to_zip", lambda _result, path: Path(path).write_text("zip"))
+    monkeypatch.setattr(ac_module, "create_backup", lambda _path: Path("C:/backups/asm_export.zip"))
+    uploads: list[int] = []
+    monkeypatch.setattr(ac_module, "upload_file", lambda _path, username, password: uploads.append(1) or "remote.zip")
+
+    def _disk_full(_result, **_kw):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(ac_module, "save_snapshot", _disk_full)
+
+    controller.export_zip_and_upload()
+
+    assert uploads == [1], "the upload must never be repeated"
+    title, text = _MessageBoxDouble.shown[-1]
+    assert title == "Local state not saved"
+    assert "remote.zip" in text and "asm_export.zip" in text and "No space left on device" in text
+    assert controller._diff_page.reset_calls == 0
+
+
+def test_export_is_blocked_when_asm_would_reject_the_file(controller, monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setattr(ac_module, "MessageBox", _MessageBoxDouble)
+    _MessageBoxDouble.shown = []
+    written: list[int] = []
+    broken = ac_module.GeneratorResult(
+        courses=[{"course_id": "c1"}],
+        classes=[{"class_id": "k1", "course_id": "c1", "instructor_id": "ghost"}],
+    )
+
+    ok = controller._write_zip_or_show_error(broken, str(tmp_path / "x.zip"), lambda _r, _p: written.append(1))
+
+    assert ok is False and written == []
+    assert _MessageBoxDouble.shown[-1][0] == "Export blocked"
+    assert "ghost" in _MessageBoxDouble.shown[-1][1]
 
 
 def test_export_upload_backup_failure_cancel_aborts_before_upload(controller, monkeypatch: pytest.MonkeyPatch):

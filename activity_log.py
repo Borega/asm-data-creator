@@ -127,12 +127,19 @@ def _is_uuid_like(value: str) -> bool:
     return bool(_UUID_RE.match((value or "").strip()))
 
 
-def _is_staff_person_row(row: dict[str, str]) -> bool:
+def _is_staff_person_row(row: dict[str, str], known_staff_ids=frozenset()) -> bool:
+    """An activity log has no role column, so the id shape is only a guess.
+
+    It holds for schools whose staff ids are names. A school keying staff on
+    the SIS uuid has uuid-shaped teachers, so ids the app knows as staff win.
+    """
     person_id = (row.get("person_id", "") or "").strip()
     if not person_id:
         return False
     if person_id.startswith("SAMPLE-"):
         return False
+    if person_id in known_staff_ids:
+        return True
     return not _is_uuid_like(person_id)
 
 
@@ -162,23 +169,25 @@ def extract_baseline_from_activity_log(
     path: str | Path,
     *,
     location_id: str = "",
+    known_staff_ids=frozenset(),
 ) -> GeneratorResult:
     """Build a GeneratorResult baseline from activity-log latest successful events.
 
     The baseline spans all diff categories (students/staff/courses/classes/rosters).
-    Per entity key, only the latest event is considered.
+    Per entity key, only the latest event is considered. ``known_staff_ids``
+    keeps uuid-keyed staff out of the students (see _is_staff_person_row).
     """
     parsed = parse_activity_log(path)
     sections: dict[str, list[dict[str, str]]] = parsed["sections"]
 
     person_rows = sections["person"]
+    staff_events = [row for row in person_rows if _is_staff_person_row(row, known_staff_ids)]
     student_events = [
         row
         for row in person_rows
-        if (row.get("person_id", "") or "").strip()
-        and _is_uuid_like((row.get("person_id", "") or "").strip())
+        if _is_uuid_like((row.get("person_id", "") or "").strip())
+        and not _is_staff_person_row(row, known_staff_ids)
     ]
-    staff_events = [row for row in person_rows if _is_staff_person_row(row)]
 
     latest_students = _latest_by_person_id(student_events)
     latest_staff = _latest_by_person_id(staff_events)
@@ -345,12 +354,14 @@ def summarize_activity_log(
     metadata: dict[str, str] = parsed["metadata"]
     person_rows: list[dict[str, str]] = parsed["sections"]["person"]
 
-    staff_events = [row for row in person_rows if _is_staff_person_row(row)]
+    # The staff ids this run generated are staff, whatever their shape.
+    known_staff = {(pid or "").strip() for pid in (generated_staff_ids or ())}
+    staff_events = [row for row in person_rows if _is_staff_person_row(row, known_staff)]
     student_events = [
         row
         for row in person_rows
-        if (row.get("person_id", "") or "").strip()
-        and _is_uuid_like((row.get("person_id", "") or "").strip())
+        if _is_uuid_like((row.get("person_id", "") or "").strip())
+        and not _is_staff_person_row(row, known_staff)
     ]
 
     latest_staff_by_id = _latest_by_person_id(staff_events)

@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_NOTE_LINES = 4        # per category — a wall of text hides the headline
+_MAX_REVIEW_NOTES = 10
 _MAX_NAMES_PER_LINE = 5
 
 
@@ -280,6 +281,7 @@ class AppController:
         self._sftp_ready = False
         self._sftp_status_message = "SFTP not configured."
         self._sftp_check_token = 0
+        self._sftp_recheck_pending = False  # set by save_sftp_credentials, run by reload_settings
 
         # Page references — set after pages are created (call set_pages())
         self._input_page = None
@@ -330,13 +332,18 @@ class AppController:
     def reload_settings(self) -> None:
         """Called by SettingsPage after save; refreshes in-memory settings.
 
-        Deliberately does not re-probe the SFTP host.  SettingsPage.save() calls
-        :meth:`save_sftp_credentials` first, which has already run a check and
-        set an authoritative status, so probing again only doubled the freeze on
-        an unreachable host — 30 s of frozen UI for one Save click.
+        Re-checks the SFTP connection only when Save changed the credentials,
+        and then off the GUI thread: a blocking probe on Save once froze the
+        window for the full timeout on an unreachable host. It runs here rather
+        than in save_sftp_credentials because only now is the new username in
+        the settings the probe reads.
         """
         self._settings = SettingsStore.load()
-        self._refresh_upload_ui_state()
+        if self._sftp_recheck_pending:
+            self._sftp_recheck_pending = False
+            self._start_sftp_status_check()
+        else:
+            self._refresh_upload_ui_state()
         if self._input_page is not None:
             self._input_page.refresh_setup_hint()
 
@@ -372,10 +379,9 @@ class AppController:
         if new_username and not is_keyring_available():
             return False, "Secure keyring backend is not available on this system."
 
-        if old_username and old_username != new_username:
-            delete_password(old_username)
-
         if not new_username:
+            if old_username:
+                delete_password(old_username)
             self._sftp_ready = False
             self._sftp_status_message = "Missing SFTP username."
             self._refresh_upload_ui_state()
@@ -389,6 +395,11 @@ class AppController:
         except CredentialError as exc:
             return False, f"Could not store SFTP password securely: {exc}"
 
+        # Only now that the new password is stored is the old one retired, so a
+        # failed change never leaves the school without a working password.
+        if old_username and old_username != new_username:
+            delete_password(old_username)
+
         try:
             effective_password = password or get_password(new_username)
         except CredentialError as exc:
@@ -400,10 +411,12 @@ class AppController:
             self._refresh_upload_ui_state()
             return True, self._sftp_status_message
 
-        check_result = check_sftp_connection(new_username, effective_password)
-        self._sftp_ready, self._sftp_status_message = self._normalize_sftp_check_result(check_result)
+        # No network here — reload_settings checks the connection in the background.
+        self._sftp_recheck_pending = True
+        self._sftp_ready = False
+        self._sftp_status_message = self.SFTP_CHECK_PENDING_MESSAGE
         self._refresh_upload_ui_state()
-        return True, self._sftp_status_message
+        return True, "Credentials saved. The connection is checked in the background."
 
     def get_sftp_status(self) -> tuple[bool, str]:
         return self._sftp_ready, self._sftp_status_message
@@ -470,6 +483,7 @@ class AppController:
             baseline = extract_baseline_from_activity_log(
                 path,
                 location_id=(self._settings.get("location_id", "") or "").strip(),
+                known_staff_ids=self._known_staff_ids(),
             )
         except Exception as exc:  # noqa: BLE001
             return False, f"Could not use activity log as diff baseline: {exc}"
@@ -577,6 +591,7 @@ class AppController:
                 return extract_baseline_from_activity_log(
                     path,
                     location_id=(self._settings.get("location_id", "") or "").strip(),
+                    known_staff_ids=self._known_staff_ids(snapshot),
                 )
             if mode == "csv":
                 return load_baseline_from_csv_source(path, config=self.build_config())
@@ -589,6 +604,25 @@ class AppController:
             )
 
         return snapshot
+
+    def _known_staff_ids(self, snapshot: GeneratorResult | None = None) -> set[str]:
+        """Staff ids from the last snapshot and the current run.
+
+        An activity log has no role column, so on its own it cannot tell a
+        uuid-keyed teacher from a student.
+        """
+        if snapshot is None:
+            try:
+                snapshot = load_snapshot()
+            except Exception:  # noqa: BLE001 - without the hint the log is only less precise
+                snapshot = None
+        known: set[str] = set()
+        for source in (snapshot, self._last_result):
+            for row in getattr(source, "staff", None) or []:
+                pid = (row.get("person_id", "") or "").strip()
+                if pid:
+                    known.add(pid)
+        return known
 
     def _has_sftp_credentials(self) -> bool:
         username = (self._settings.get("sftp_username", "") or "").strip()
@@ -882,6 +916,15 @@ class AppController:
 
         self._warn_if_staff_ids_were_rekeyed(result, snapshot)
 
+        # Most warnings are routine ("no instructor for offer …"). Only those that
+        # change who ends up in which class are put in front of the user.
+        review = [w[len("REVIEW: "):] for w in (getattr(result, "warnings", None) or []) if w.startswith("REVIEW: ")]
+        if review:
+            shown = "\n\n".join(f"• {w}" for w in review[:_MAX_REVIEW_NOTES])
+            if len(review) > _MAX_REVIEW_NOTES:
+                shown += f"\n\n…and {len(review) - _MAX_REVIEW_NOTES} more."
+            MessageBox("Check before exporting", shown, self._window).exec()
+
         diff_snapshot = self._build_snapshot_for_diff(snapshot)
         diff_result = compute_diff(result, diff_snapshot)
         self._diff_page.load_diff(diff_result, self._build_asm_state(snapshot))
@@ -918,8 +961,9 @@ class AppController:
             return
 
         # Save snapshot only after successful ZIP write
-        save_snapshot(result, via="export")
         self._remember_pins(result)
+        if not self._save_snapshot_or_warn(result, "export", f"The ZIP was written to:\n{path}"):
+            return
 
         # Notify user, then reset diff page to placeholder
         box = MessageBox(
@@ -968,8 +1012,9 @@ class AppController:
             if not self._write_zip_or_show_error(result, str(zip_path), write_to_zip):
                 return
 
+            backup_path = None
             try:
-                create_backup(zip_path)
+                backup_path = create_backup(zip_path)
             except Exception as exc:  # noqa: BLE001
                 box = MessageBox(
                     "Backup Failed",
@@ -1013,8 +1058,16 @@ class AppController:
                         return
                     attempt += 1
 
-        save_snapshot(result, via="upload")
+        # ASM now holds these ids whatever happens to the local files.
         self._remember_pins(result)
+        kept = f"The uploaded ZIP is kept at:\n{backup_path}" if backup_path else "No local backup of the ZIP exists."
+        if not self._save_snapshot_or_warn(
+            result,
+            "upload",
+            f"The upload to Apple succeeded ({remote_name}).\n{kept}\n\n"
+            "Do not upload again before checking the result in ASM.",
+        ):
+            return
 
         box = MessageBox(
             "Upload Successful",
@@ -1146,7 +1199,38 @@ class AppController:
         except Exception as exc:  # noqa: BLE001 — the ZIP is already written
             logger.warning("Could not update person pins: %s", exc, exc_info=exc)
 
+    def _save_snapshot_or_warn(self, result: GeneratorResult, via: str, done: str) -> bool:
+        """Persist the snapshot; if that fails, say plainly what already happened."""
+        try:
+            save_snapshot(
+                result, via=via, staff_id_source=self._settings.get("staff_id_source", "name")
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 - disk full, locked file, missing folder
+            logger.error("Could not save the snapshot after %s", via, exc_info=exc)
+            MessageBox(
+                "Local state not saved",
+                f"{done}\n\nBut the snapshot could not be saved:\n{exc}\n\n"
+                "The next review still compares against the previous snapshot, "
+                "so these changes will show up again.",
+                self._window,
+            ).exec()
+            return False
+
     def _write_zip_or_show_error(self, result: GeneratorResult, path: str, write_to_zip) -> bool:
+        from asm_generator.writer import validate_result
+
+        problems = validate_result(result)
+        if problems:
+            shown = "\n".join(f"• {p}" for p in problems[:10])
+            if len(problems) > 10:
+                shown += f"\n…and {len(problems) - 10} more."
+            MessageBox(
+                "Export blocked",
+                "Apple School Manager would reject this file, so nothing was written:\n\n" + shown,
+                self._window,
+            ).exec()
+            return False
         try:
             write_to_zip(result, path)
             return True

@@ -14,7 +14,6 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 
 from asm_generator.config import GeneratorResult
 from settings_store import _DATA_DIR
@@ -64,12 +63,13 @@ def load_provenance() -> dict:
     return prov if isinstance(prov, dict) else {}
 
 
-def save_snapshot(result: GeneratorResult, *, via: str = "export") -> None:
+def save_snapshot(result: GeneratorResult, *, via: str = "export", staff_id_source: str = "") -> None:
     """Atomically write GeneratorResult to snapshot.json.
 
     ``via`` records what the snapshot is evidence of. Only ``"upload"`` means
     ASM was actually handed these rows; ``"export"`` produced a ZIP that may
-    never have been sent.
+    never have been sent. ``staff_id_source`` records how the staff ids were
+    built, so a later switch can be detected directly; absent in older files.
 
     Atomic strategy: write to a temp file on the SAME volume, then os.replace().
     The temp file dir MUST be SNAPSHOT_DIR (not tempfile.gettempdir()) to ensure
@@ -90,6 +90,7 @@ def save_snapshot(result: GeneratorResult, *, via: str = "export") -> None:
         "provenance": {
             "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "via": via,
+            **({"staff_id_source": staff_id_source} if staff_id_source else {}),
         },
     }
 

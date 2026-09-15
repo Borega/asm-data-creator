@@ -46,6 +46,60 @@ def _fieldnames_from_template(filename: str, fallback: list[str]) -> list[str]:
     return fallback
 
 
+def validate_result(result: GeneratorResult) -> list[str]:
+    """What ASM would reject in these rows; empty when the ZIP is safe to write.
+
+    Runs on the final approved rows: review decisions and pruning happen after
+    generation, so this is the last point where a broken reference can show.
+    An instructor that is not in staff fails the whole upload.
+    """
+    problems: list[str] = []
+
+    def ids(rows: list[dict], key: str, label: str) -> set[str]:
+        seen: set[str] = set()
+        dupes: set[str] = set()
+        blank = 0
+        for row in rows:
+            value = (row.get(key, "") or "").strip()
+            if not value:
+                blank += 1
+            elif value in seen:
+                dupes.add(value)
+            else:
+                seen.add(value)
+        if blank:
+            problems.append(f"{label}: {blank} row(s) without {key}")
+        if dupes:
+            problems.append(f"{label}: duplicate {key} {', '.join(sorted(dupes)[:5])}")
+        return seen
+
+    students = ids(result.students, "person_id", "students")
+    staff = ids(result.staff, "person_id", "staff")
+    courses = ids(result.courses, "course_id", "courses")
+    classes = ids(result.classes, "class_id", "classes")
+
+    for cls in result.classes:
+        class_id = cls.get("class_id", "")
+        if (cls.get("course_id", "") or "").strip() not in courses:
+            problems.append(f"class {class_id}: unknown course {cls.get('course_id', '')!r}")
+        for key, value in cls.items():
+            pid = (value or "").strip() if key.startswith("instructor_id") else ""
+            if pid and pid not in staff:
+                problems.append(f"class {class_id}: instructor {pid} is not in staff")
+
+    enrolled: set[tuple[str, str]] = set()
+    for roster in result.rosters:
+        pair = ((roster.get("class_id", "") or "").strip(), (roster.get("student_id", "") or "").strip())
+        if pair in enrolled:
+            problems.append(f"roster: student {pair[1]} listed twice in class {pair[0]}")
+        enrolled.add(pair)
+        if pair[0] not in classes:
+            problems.append(f"roster: class {pair[0]} is not in classes")
+        if pair[1] not in students:
+            problems.append(f"roster: student {pair[1]} is not in students")
+    return problems
+
+
 def _normalize_rows(fieldnames: list[str], rows: list[dict]) -> list[dict]:
     """Normalize rows to template fieldnames and convert None/missing to empty strings."""
     normalized: list[dict] = []

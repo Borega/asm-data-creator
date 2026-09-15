@@ -7,7 +7,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-TIMESTAMP_PATTERN = re.compile(r"^\d{8}_\d{6}$")
+TIMESTAMP_PATTERN = re.compile(r"^\d{8}_\d{6}(?:_\d+)?$")  # _2, _3 … for the same second
 DEFAULT_RETENTION_LIMIT = 5
 
 logger = logging.getLogger(__name__)
@@ -56,8 +56,15 @@ def create_backup(
     backup_root = get_backup_root()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_dir = backup_root / timestamp
-
-    backup_dir.mkdir(parents=True, exist_ok=False)
+    suffix = 1
+    while True:
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            # A second backup within the same second keeps both, still sorted by name.
+            suffix += 1
+            backup_dir = backup_root / f"{timestamp}_{suffix}"
 
     destination = backup_dir / source.name
     try:

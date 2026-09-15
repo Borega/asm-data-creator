@@ -6,8 +6,13 @@ import settings_store
 
 @pytest.fixture(autouse=True)
 def _no_legacy_data_dir(tmp_path, monkeypatch):
-    """Keep a developer's real legacy data folder out of every test."""
+    """Keep the developer's real data folders out of every test.
+
+    Both matter: a real snapshot.json beside missing settings reads as an
+    existing install, which flips the fresh-install default.
+    """
     monkeypatch.setattr(settings_store, "_LEGACY_DIR", tmp_path / "no-legacy-dir")
+    monkeypatch.setattr(settings_store, "_DATA_DIR", tmp_path / "no-data-dir")
 
 
 STUDENT_HEADER = "externKey\tlongName\tforeName\tklasse.name\n"
