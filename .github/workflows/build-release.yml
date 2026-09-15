@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -60,7 +60,7 @@ jobs:
           echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: "pip"
@@ -89,7 +89,7 @@ jobs:
           Compress-Archive -Path "dist/ASM-Generator/*" -DestinationPath "ASM-Generator-${{ steps.version.outputs.tag }}.zip" -Force
 
       - name: Create tag and GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ASM Generator ${{ steps.version.outputs.tag }}
