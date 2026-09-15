@@ -17,6 +17,13 @@ def qapp() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def _no_real_settings(monkeypatch):
+    """Without this the controller loads the real settings, reads the real SFTP
+    password from the credential store and probes Apple's server on startup."""
+    monkeypatch.setattr("gui.app_controller.SettingsStore.load", lambda: {})
+
+
 def _controller(qapp, **settings) -> AppController:
     controller = AppController(QWidget())
     controller._settings = settings
