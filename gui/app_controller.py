@@ -1061,6 +1061,8 @@ class AppController:
         # ASM now holds these ids whatever happens to the local files.
         self._remember_pins(result)
         kept = f"The uploaded ZIP is kept at:\n{backup_path}" if backup_path else "No local backup of the ZIP exists."
+        # ponytail: returning before reset() on purpose — the review stays
+        # loaded, so nothing is lost; never move the reset above this check.
         if not self._save_snapshot_or_warn(
             result,
             "upload",
@@ -1211,8 +1213,8 @@ class AppController:
             MessageBox(
                 "Local state not saved",
                 f"{done}\n\nBut the snapshot could not be saved:\n{exc}\n\n"
-                "The next review still compares against the previous snapshot, "
-                "so these changes will show up again.",
+                "The account ids were kept. The next review still compares against "
+                "the previous snapshot, so these changes will show up again.",
                 self._window,
             ).exec()
             return False

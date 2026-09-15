@@ -336,6 +336,17 @@ Löschungen unentschieden sind.
 | **Export ZIP** | ZIP-Datei lokal speichern |
 | **Export & Upload** | ZIP erstellen und direkt zu Apple hochladen |
 
+Meldungen dabei:
+
+- **Check before exporting** — nach dem Generieren: z. B. ein Kurseintrag, der
+  per Name auf mehrere Schüler passt (niemand wird eingetragen), oder eine Klasse
+  mit mehr als drei Lehrkräften (nur drei werden geliefert).
+- **Export blocked** — die Daten enthalten fehlende oder doppelte IDs bzw.
+  Verweise ins Leere. ASM würde die Datei ablehnen, daher wird nichts geschrieben.
+- **Local state not saved** — Export bzw. Upload hat geklappt, nur der Snapshot
+  konnte nicht gespeichert werden. Die Konto-IDs sind gesichert. Nach einem Upload
+  **nicht erneut hochladen**, bevor das Ergebnis in ASM geprüft ist.
+
 ### Settings-Seite – Einstellungen
 
 Die Settings-Seite ist in vier Bereiche unterteilt:
